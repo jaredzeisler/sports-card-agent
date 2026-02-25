@@ -105,24 +105,6 @@ class EbayClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_sold_comps(self, query: str, days: int = 90, limit: int = 50) -> list[dict]:
-        """Search completed/sold listings for comparable pricing data."""
-        params = {
-            "q": query,
-            "limit": limit,
-            "filter": "buyingOptions:{FIXED_PRICE},conditions:{UNSPECIFIED}",
-            "sort": "-price",
-        }
-        resp = httpx.get(
-            f"{self.base_url}/buy/browse/v1/item_summary/search",
-            headers=self._app_headers(),
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("itemSummaries", [])
-
     # ── Order API (Buy) ─────────────────────────────────────────────
 
     def place_order(self, item_id: str, quantity: int = 1) -> dict:

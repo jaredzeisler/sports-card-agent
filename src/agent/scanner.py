@@ -204,10 +204,12 @@ class MarketScanner:
             trend = cl_data["trend"] if cl_data else "stable"
             population = cl_data.get("population", 0) if cl_data else 0
 
-            # Calculate aggregated FMV
+            # Calculate FMV from CardLadder recent sales data
             fmv_data = calculate_fmv(
                 cardladder_fmv=cl_fmv,
                 cardladder_confidence=cl_confidence,
+                avg_30d=cl_data.get("avg_30d") if cl_data else None,
+                avg_90d=cl_data.get("avg_90d") if cl_data else None,
             )
 
             if fmv_data["fmv"] <= 0:

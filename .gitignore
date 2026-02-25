@@ -13,3 +13,4 @@ htmlcov/
 *.swo
 .venv/
 venv/
+data/

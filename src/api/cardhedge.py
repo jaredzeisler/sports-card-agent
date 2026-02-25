@@ -1,4 +1,12 @@
-"""Card Hedge API client for card pricing and valuation."""
+"""Card Hedge API client for card pricing and valuation.
+
+API docs: https://api.cardhedger.com/docs
+Auth: X-API-Key header
+
+Key flow for pricing a card in our inventory:
+  1. search_card(query) -> get card_id from results
+  2. get_comps(card_id, grade) -> get comp_price (FMV based on recent eBay sold)
+"""
 
 import httpx
 
@@ -26,8 +34,15 @@ class CardHedgeClient:
         category: str | None = None,
         page: int = 1,
         page_size: int = 10,
-    ) -> list[dict]:
-        """Search for cards by text query. Returns list of card results."""
+    ) -> dict:
+        """Search for cards by text query.
+
+        Returns dict with:
+          page (int), pages (int), cards (list of dicts)
+
+        Each card has: card_id, description, player, set, number, variant,
+        image, category, category_group, set_type, 90_day_sales, grade, price
+        """
         body = {
             "query": query,
             "page": page,
@@ -44,17 +59,51 @@ class CardHedgeClient:
                 timeout=30,
             )
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("results", data) if isinstance(data, dict) else data
+            return resp.json()
         except httpx.HTTPError:
-            return []
+            return {"page": 0, "pages": 0, "cards": []}
+
+    def get_comps(
+        self,
+        card_id: str,
+        grade: str | None = None,
+        count: int = 5,
+        time_weighted: bool = True,
+    ) -> dict | None:
+        """Get comparable sold prices for a card.
+
+        Returns dict with:
+          comp_price (float) - time-weighted average of recent eBay sold prices
+          high (float), low (float) - price range
+          count_used (int) - number of comps found
+          raw_prices (list) - individual sales with price, sale_date, sale_type, title, sale_url
+        """
+        body = {
+            "card_id": card_id,
+            "count": count,
+            "time_weighted": time_weighted,
+        }
+        if grade:
+            body["grade"] = grade
+
+        try:
+            resp = httpx.post(
+                f"{BASE_URL}/cards/comps",
+                headers=self._headers(),
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError:
+            return None
 
     def get_price_estimate(
         self,
         card_id: str,
         grade: str | None = None,
     ) -> dict | None:
-        """Get price estimate for a single card."""
+        """Get price estimate with confidence score for a single card."""
         body = {"card_id": card_id}
         if grade:
             body["grade"] = grade
@@ -85,26 +134,7 @@ class CardHedgeClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("results", data) if isinstance(data, dict) else data
-        except httpx.HTTPError:
-            return []
-
-    def get_comps(self, card_id: str, grade: str | None = None) -> list[dict]:
-        """Get comparable sold prices for a card."""
-        body = {"card_id": card_id}
-        if grade:
-            body["grade"] = grade
-
-        try:
-            resp = httpx.post(
-                f"{BASE_URL}/cards/comps",
-                headers=self._headers(),
-                json=body,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("results", data) if isinstance(data, dict) else data
+            return data.get("results", []) if isinstance(data, dict) else data
         except httpx.HTTPError:
             return []
 
@@ -128,7 +158,7 @@ class CardHedgeClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("prices", data) if isinstance(data, dict) else data
+            return data.get("prices", []) if isinstance(data, dict) else data
         except httpx.HTTPError:
             return []
 
@@ -147,6 +177,75 @@ class CardHedgeClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("results", data) if isinstance(data, dict) else data
+            return data.get("results", []) if isinstance(data, dict) else data
         except httpx.HTTPError:
             return []
+
+    def get_fmv(
+        self,
+        player: str,
+        year: int | None = None,
+        brand: str | None = None,
+        set_name: str | None = None,
+        grade: float | None = None,
+        sport: str = "basketball",
+    ) -> dict | None:
+        """High-level: search for a card and get its FMV from comps.
+
+        This is the main method for pricing inventory cards.
+        Returns dict with: fmv, high, low, num_comps, card_id
+        """
+        # Build search query
+        parts = [player]
+        if year:
+            parts.insert(0, str(year))
+        if brand:
+            parts.append(brand)
+        if set_name:
+            parts.append(set_name)
+        query = " ".join(parts)
+
+        # Map sport to Card Hedge category
+        category_map = {
+            "basketball": "Basketball",
+            "baseball": "Baseball",
+            "football": "Football",
+            "soccer": "Soccer",
+            "hockey": "Hockey",
+        }
+        category = category_map.get(sport)
+
+        # Search for the card
+        search_result = self.search_card(query, category=category, page_size=5)
+        cards = search_result.get("cards", [])
+        if not cards:
+            return None
+
+        # Use the first matching card
+        card = cards[0]
+        card_id = card.get("card_id")
+        if not card_id:
+            return None
+
+        # Build grade string for comps (e.g. "PSA 10")
+        grade_str = None
+        if grade:
+            grade_int = int(grade) if grade == int(grade) else grade
+            grade_str = f"PSA {grade_int}"
+
+        # Get comps (real eBay sold prices)
+        comps = self.get_comps(card_id, grade=grade_str)
+        if not comps or not comps.get("comp_price"):
+            # Try without grade
+            comps = self.get_comps(card_id)
+            if not comps or not comps.get("comp_price"):
+                return None
+
+        return {
+            "fmv": comps["comp_price"],
+            "high": comps.get("high", 0),
+            "low": comps.get("low", 0),
+            "num_comps": comps.get("count_used", 0),
+            "card_id": card_id,
+            "card_description": card.get("description", ""),
+        }

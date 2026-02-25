@@ -457,5 +457,124 @@ def update_fmv_cmd(dry_run, delay, source):
             console.print(f"  - {err}")
 
 
+# ── Flag Mismatches ────────────────────────────────────────────────
+
+@cli.command("flag-mismatches")
+@click.option("--min-paid", default=25.0, help="Only flag cards above this purchase price")
+@click.option("--low-threshold", default=0.30, help="Flag if FMV < this fraction of paid (default 0.30)")
+@click.option("--high-threshold", default=5.0, help="Flag if FMV > this multiple of paid (default 5.0)")
+def flag_mismatches_cmd(min_paid, low_threshold, high_threshold):
+    """Flag cards where FMV looks wrong (bad API match, missing data, non-cards)."""
+    from src.engine.mismatch import flag_mismatches
+    result = flag_mismatches(
+        min_paid=min_paid,
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
+    )
+    s = result["summary"]
+    console.print(f"\n[bold]Mismatch Report[/]  —  {s['total_cards']} cards, "
+                  f"[red]{s['flagged']} flagged[/], {s['clean']} clean\n")
+
+    # ── Suspect LOW ───────────────────────────────────────────
+    low = result["suspect_low"]
+    if low:
+        table = Table(title=f"Suspect LOW FMV ({len(low)} cards) — likely wrong API match")
+        table.add_column("ID", justify="right", style="dim")
+        table.add_column("Player", style="cyan")
+        table.add_column("Year")
+        table.add_column("Variation", style="yellow")
+        table.add_column("Grade")
+        table.add_column("Paid", justify="right")
+        table.add_column("FMV", justify="right", style="red")
+        table.add_column("Diff", justify="right")
+        table.add_column("Reason")
+
+        for r in low:
+            grade_str = f"PSA {int(r['grade'])}" if r["graded"] and r["grade"] else "Raw"
+            table.add_row(
+                str(r["id"]),
+                r["player"][:25],
+                str(r["year"] or "-"),
+                (r["variation"] or "-")[:15],
+                grade_str,
+                f"${r['purchase_price']:.2f}",
+                f"${r['current_fmv']:.2f}",
+                f"{r['diff_pct']:+.0f}%",
+                (r["reason"] or "")[:50],
+            )
+        console.print(table)
+        console.print()
+
+    # ── Suspect HIGH ──────────────────────────────────────────
+    high = result["suspect_high"]
+    if high:
+        table = Table(title=f"Suspect HIGH FMV ({len(high)} cards) — verify these")
+        table.add_column("ID", justify="right", style="dim")
+        table.add_column("Player", style="cyan")
+        table.add_column("Year")
+        table.add_column("Variation", style="yellow")
+        table.add_column("Grade")
+        table.add_column("Paid", justify="right")
+        table.add_column("FMV", justify="right", style="green")
+        table.add_column("Diff", justify="right")
+        table.add_column("Reason")
+
+        for r in high:
+            grade_str = f"PSA {int(r['grade'])}" if r["graded"] and r["grade"] else "Raw"
+            table.add_row(
+                str(r["id"]),
+                r["player"][:25],
+                str(r["year"] or "-"),
+                (r["variation"] or "-")[:15],
+                grade_str,
+                f"${r['purchase_price']:.2f}",
+                f"${r['current_fmv']:.2f}",
+                f"{r['diff_pct']:+.0f}%",
+                (r["reason"] or "")[:50],
+            )
+        console.print(table)
+        console.print()
+
+    # ── Missing FMV ───────────────────────────────────────────
+    missing = result["missing_fmv"]
+    if missing:
+        table = Table(title=f"Missing FMV ({len(missing)} cards) — no pricing data")
+        table.add_column("ID", justify="right", style="dim")
+        table.add_column("Player", style="cyan")
+        table.add_column("Year")
+        table.add_column("Variation", style="yellow")
+        table.add_column("Grade")
+        table.add_column("Paid", justify="right")
+
+        for r in missing:
+            grade_str = f"PSA {int(r['grade'])}" if r["graded"] and r["grade"] else "Raw"
+            table.add_row(
+                str(r["id"]),
+                r["player"][:25],
+                str(r["year"] or "-"),
+                (r["variation"] or "-")[:15],
+                grade_str,
+                f"${r['purchase_price']:.2f}",
+            )
+        console.print(table)
+        console.print()
+
+    # ── Non-cards ─────────────────────────────────────────────
+    nc = result["non_cards"]
+    if nc:
+        table = Table(title=f"Non-Card Items ({len(nc)} rows)")
+        table.add_column("ID", justify="right", style="dim")
+        table.add_column("Description", style="yellow")
+        table.add_column("Paid", justify="right")
+
+        for r in nc:
+            table.add_row(str(r["id"]), r["player"][:40], f"${r['purchase_price']:.2f}")
+        console.print(table)
+        console.print()
+
+    if s["flagged"] == 0:
+        console.print("[green]All cards look clean![/]")
+
+
 if __name__ == "__main__":
     cli()

@@ -102,13 +102,14 @@ class SportsCardsProClient:
         grade: float | None = None,
         grading_company: str | None = None,
         card_number: str | None = None,
+        variation: str | None = None,
     ) -> dict | None:
         """Get FMV for a card based on recent sold prices.
 
         Returns dict with: fmv, grade_used, price_field, product_name,
         set_name, product_id, sales_volume, all_prices
         """
-        # Build search query
+        # Build search query — include variation/parallel for accurate match
         parts = []
         if year:
             parts.append(str(year))
@@ -117,6 +118,8 @@ class SportsCardsProClient:
         elif brand:
             parts.append(brand)
         parts.append(player)
+        if variation:
+            parts.append(variation)
         if card_number:
             parts.append(f"#{card_number}")
         query = " ".join(parts)

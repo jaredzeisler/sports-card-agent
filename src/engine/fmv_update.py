@@ -30,6 +30,7 @@ def _try_sportscardspro(card, settings) -> dict | None:
         grade=card.grade,
         grading_company=card.grading_company,
         card_number=card.card_number,
+        variation=card.variation,
     )
     if result and result.get("fmv") and result["fmv"] > 0:
         vol = result.get("sales_volume", 0)

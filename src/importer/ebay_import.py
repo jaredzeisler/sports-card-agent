@@ -110,6 +110,7 @@ def _parse_ebay_date(value: str) -> datetime | None:
     if not value or not value.strip():
         return None
     formats = [
+        "%b %d, %Y",                  # Dec 31, 2025
         "%b-%d-%y", "%b-%d-%Y",       # Jan-15-25, Jan-15-2025
         "%m/%d/%Y", "%m/%d/%y",       # 01/15/2025, 01/15/25
         "%Y-%m-%d",                    # 2025-01-15
@@ -131,17 +132,19 @@ def _read_ebay_rows(file_path: str) -> list[dict]:
     if ext in (".xls", ".xlsx"):
         import openpyxl
         wb = openpyxl.load_workbook(path, read_only=True)
-        ws = wb.active
-        rows_iter = ws.iter_rows(values_only=False)
-        header_row = next(rows_iter)
-        headers = [str(cell.value or "").strip() for cell in header_row]
         rows = []
-        for row in rows_iter:
-            row_dict = {}
-            for i, cell in enumerate(row):
-                if i < len(headers):
-                    row_dict[headers[i]] = cell.value if cell.value is not None else ""
-            rows.append(row_dict)
+        for ws in wb.worksheets:
+            rows_iter = ws.iter_rows(values_only=False)
+            header_row = next(rows_iter, None)
+            if header_row is None:
+                continue
+            headers = [str(cell.value or "").strip() for cell in header_row]
+            for row in rows_iter:
+                row_dict = {}
+                for i, cell in enumerate(row):
+                    if i < len(headers):
+                        row_dict[headers[i]] = cell.value if cell.value is not None else ""
+                rows.append(row_dict)
         wb.close()
         return rows
 

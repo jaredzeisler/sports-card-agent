@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # CardLadder
     cardladder_api_key: str = Field(default="", alias="CARDLADDER_API_KEY")
 
+    # Card Hedge
+    cardhedge_api_key: str = Field(default="", alias="CARDHEDGE_API_KEY")
+
     # PSA
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
 

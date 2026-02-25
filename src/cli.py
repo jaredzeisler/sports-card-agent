@@ -438,5 +438,24 @@ def targets(min_profit):
     console.print(table)
 
 
+# ── Update FMV ─────────────────────────────────────────────────────
+
+@cli.command("update-fmv")
+@click.option("--dry-run", is_flag=True, default=False, help="Don't write to DB")
+@click.option("--delay", default=1.0, help="Seconds between API calls")
+@click.option("--source", type=click.Choice(["auto", "sportscardspro", "cardhedge", "ebay"]), default="auto",
+              help="Pricing source (auto: SportsCardsPro -> Card Hedge -> eBay)")
+def update_fmv_cmd(dry_run, delay, source):
+    """Update fair market values for all cards in inventory."""
+    from src.engine.fmv_update import update_all_fmv
+    result = update_all_fmv(dry_run=dry_run, delay=delay, source=source)
+    console.print(f"\n[green]Updated:[/] {result['updated']} cards")
+    console.print(f"[yellow]No data:[/] {result['no_data']} cards")
+    if result["errors"]:
+        console.print(f"[red]Errors:[/] {len(result['errors'])}")
+        for err in result["errors"][:10]:
+            console.print(f"  - {err}")
+
+
 if __name__ == "__main__":
     cli()

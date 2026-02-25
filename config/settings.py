@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # Card Hedge
     cardhedge_api_key: str = Field(default="", alias="CARDHEDGE_API_KEY")
 
+    # SportsCardsPro (PriceCharting)
+    sportscardspro_api_key: str = Field(default="", alias="SPORTSCARDSPRO_API_KEY")
+
     # PSA
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
 

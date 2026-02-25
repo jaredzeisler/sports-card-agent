@@ -149,13 +149,15 @@ def inventory_list(status):
 @click.option("--year", type=int, help="Card year")
 @click.option("--brand", help="Card brand (e.g. Panini)")
 @click.option("--set-name", help="Card set (e.g. Prizm)")
+@click.option("--variation", help="Card variation (e.g. Silver, Gold, Refractor)")
+@click.option("--card-number", help="Card number (e.g. #280)")
 @click.option("--sport", default="basketball", help="Sport")
 @click.option("--price", type=float, help="Purchase price")
 @click.option("--graded", is_flag=True, help="Is the card graded?")
 @click.option("--grade", type=float, help="Numeric grade (e.g. 10)")
 @click.option("--cert", help="PSA/BGS cert number")
 @click.option("--source", help="Where you bought it")
-def inventory_add(player, year, brand, set_name, sport, price, graded, grade, cert, source):
+def inventory_add(player, year, brand, set_name, variation, card_number, sport, price, graded, grade, cert, source):
     """Manually add a card to your inventory."""
     session = get_session()
     try:
@@ -164,6 +166,8 @@ def inventory_add(player, year, brand, set_name, sport, price, graded, grade, ce
             year=year,
             brand=brand,
             set_name=set_name,
+            variation=variation,
+            card_number=card_number,
             sport=sport,
             purchase_price=price,
             graded=graded or grade is not None,

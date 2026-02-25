@@ -123,8 +123,41 @@ def _parse_ebay_date(value: str) -> datetime | None:
     return None
 
 
+def _read_ebay_rows(file_path: str) -> list[dict]:
+    """Read rows from an eBay export file (CSV, XLS, or XLSX)."""
+    path = Path(file_path)
+    ext = path.suffix.lower()
+
+    if ext in (".xls", ".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=False)
+        header_row = next(rows_iter)
+        headers = [str(cell.value or "").strip() for cell in header_row]
+        rows = []
+        for row in rows_iter:
+            row_dict = {}
+            for i, cell in enumerate(row):
+                if i < len(headers):
+                    row_dict[headers[i]] = cell.value if cell.value is not None else ""
+            rows.append(row_dict)
+        wb.close()
+        return rows
+
+    # Default: CSV (also handles .tsv)
+    with open(path, "r", encoding="utf-8-sig") as f:
+        sample = f.read(2048)
+        f.seek(0)
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        reader = csv.DictReader(f, dialect=dialect)
+        if reader.fieldnames:
+            reader.fieldnames = [h.strip() for h in reader.fieldnames]
+        return list(reader)
+
+
 def import_ebay_csv(file_path: str) -> dict:
-    """Import cards from an eBay purchase history CSV export.
+    """Import cards from an eBay purchase history export (CSV, XLS, or XLSX).
 
     Expected columns: OrderNumber, OrderDate, ItemID, Seller, ItemName,
     ItemPrice, Currency, Quantity, OrderTotal, OrderNotes, TrackingNumber,
@@ -136,6 +169,13 @@ def import_ebay_csv(file_path: str) -> dict:
     if not path.exists():
         return {"imported": 0, "skipped": 0, "errors": [f"File not found: {file_path}"]}
 
+    try:
+        rows = _read_ebay_rows(file_path)
+    except ImportError:
+        return {"imported": 0, "skipped": 0, "errors": ["openpyxl not installed. Run: pip install openpyxl"]}
+    except Exception as e:
+        return {"imported": 0, "skipped": 0, "errors": [f"Failed to read file: {str(e)}"]}
+
     init_db()
     session = get_session()
     imported = 0
@@ -143,80 +183,69 @@ def import_ebay_csv(file_path: str) -> dict:
     errors = []
 
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            # eBay CSVs may be tab-delimited or comma-delimited
-            sample = f.read(2048)
-            f.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
-            reader = csv.DictReader(f, dialect=dialect)
+        for row_num, row in enumerate(rows, start=2):
+            try:
+                title = str(row.get("ItemName") or row.get("Item Name") or "").strip()
+                item_id = str(row.get("ItemID") or row.get("Item ID") or "").strip()
+                price_str = row.get("ItemPrice") or row.get("Item Price") or ""
+                order_date_str = str(row.get("OrderDate") or row.get("Order Date") or "")
+                order_number = str(row.get("OrderNumber") or row.get("Order Number") or "").strip()
+                seller = str(row.get("Seller") or "").strip()
 
-            # Normalize header names (strip whitespace)
-            if reader.fieldnames:
-                reader.fieldnames = [h.strip() for h in reader.fieldnames]
+                price = _parse_ebay_price(price_str)
+                if not title or not price or price <= 0:
+                    skipped += 1
+                    continue
 
-            for row_num, row in enumerate(reader, start=2):
-                try:
-                    title = (row.get("ItemName") or row.get("Item Name") or "").strip()
-                    item_id = (row.get("ItemID") or row.get("Item ID") or "").strip()
-                    price_str = row.get("ItemPrice") or row.get("Item Price") or ""
-                    order_date_str = row.get("OrderDate") or row.get("Order Date") or ""
-                    order_number = (row.get("OrderNumber") or row.get("Order Number") or "").strip()
-                    seller = (row.get("Seller") or "").strip()
-
-                    price = _parse_ebay_price(price_str)
-                    if not title or not price or price <= 0:
+                # Dedup by eBay item ID
+                if item_id:
+                    existing = session.query(Card).filter_by(ebay_item_id=item_id).first()
+                    if existing:
                         skipped += 1
                         continue
 
-                    # Dedup by eBay item ID
-                    if item_id:
-                        existing = session.query(Card).filter_by(ebay_item_id=item_id).first()
-                        if existing:
-                            skipped += 1
-                            continue
+                # Parse the listing title for card details
+                parsed = parse_listing_title(title)
 
-                    # Parse the listing title for card details
-                    parsed = parse_listing_title(title)
+                purchase_date = _parse_ebay_date(order_date_str)
 
-                    purchase_date = _parse_ebay_date(order_date_str)
+                card = Card(
+                    player=parsed.get("player") or title[:100],
+                    year=parsed.get("year"),
+                    brand=parsed.get("brand"),
+                    set_name=parsed.get("set_name"),
+                    sport=parsed.get("sport") or "basketball",
+                    graded=parsed.get("grade") is not None,
+                    grade=parsed.get("grade"),
+                    grading_company="PSA" if parsed.get("grade") else None,
+                    variation=parsed.get("variation"),
+                    purchase_price=price,
+                    purchase_date=purchase_date or datetime.now(timezone.utc),
+                    purchase_source="ebay",
+                    status=CardStatus.IN_COLLECTION,
+                    ebay_item_id=item_id or None,
+                    notes=f"Imported from eBay (order {order_number}, seller: {seller})",
+                )
+                session.add(card)
+                session.flush()
 
-                    card = Card(
-                        player=parsed.get("player") or title[:100],
-                        year=parsed.get("year"),
-                        brand=parsed.get("brand"),
-                        set_name=parsed.get("set_name"),
-                        sport=parsed.get("sport") or "basketball",
-                        graded=parsed.get("grade") is not None,
-                        grade=parsed.get("grade"),
-                        grading_company="PSA" if parsed.get("grade") else None,
-                        variation=parsed.get("variation"),
-                        purchase_price=price,
-                        purchase_date=purchase_date or datetime.now(timezone.utc),
-                        purchase_source="ebay",
-                        status=CardStatus.IN_COLLECTION,
-                        ebay_item_id=item_id or None,
-                        notes=f"Imported from eBay CSV (order {order_number}, seller: {seller})",
-                    )
-                    session.add(card)
-                    session.flush()
+                txn = Transaction(
+                    card_id=card.id,
+                    transaction_type=TransactionType.BUY,
+                    price=price,
+                    platform="ebay",
+                    ebay_order_id=order_number or None,
+                )
+                session.add(txn)
+                imported += 1
 
-                    txn = Transaction(
-                        card_id=card.id,
-                        transaction_type=TransactionType.BUY,
-                        price=price,
-                        platform="ebay",
-                        ebay_order_id=order_number or None,
-                    )
-                    session.add(txn)
-                    imported += 1
-
-                except Exception as e:
-                    errors.append(f"Row {row_num}: {str(e)}")
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
 
         session.commit()
     except Exception as e:
         session.rollback()
-        errors.append(f"CSV import error: {str(e)}")
+        errors.append(f"Import error: {str(e)}")
     finally:
         session.close()
 

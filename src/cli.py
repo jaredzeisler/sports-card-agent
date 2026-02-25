@@ -381,7 +381,7 @@ def import_ebay_cmd(days):
 @import_group.command("ebay-csv")
 @click.argument("file_path", type=click.Path(exists=True))
 def import_ebay_csv_cmd(file_path):
-    """Import purchase history from an eBay CSV export."""
+    """Import purchase history from an eBay export (CSV, XLS, or XLSX)."""
     from src.importer.ebay_import import import_ebay_csv
     result = import_ebay_csv(file_path)
     console.print(f"[green]Imported:[/] {result['imported']} cards")

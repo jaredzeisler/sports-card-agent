@@ -216,10 +216,19 @@ class EbayClient:
 
     def get_orders(self, days: int = 365, limit: int = 200) -> list[dict]:
         """Fetch recent purchase orders. Requires user token."""
+        from datetime import timedelta
+
+        date_from = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT00:00:00.000Z"
+        )
+        params = {
+            "limit": limit,
+            "filter": f"creationdate:[{date_from}..]",
+        }
         resp = httpx.get(
-            f"{self.base_url}/buy/order/v2/guest_purchase_order",
+            f"{self.base_url}/buy/order/v2/purchase_order",
             headers=self._user_headers(),
-            params={"limit": limit},
+            params=params,
             timeout=30,
         )
         resp.raise_for_status()

@@ -367,7 +367,7 @@ def import_file_cmd(file_path, sport):
 @import_group.command("ebay")
 @click.option("--days", default=365, help="Number of days of history to import")
 def import_ebay_cmd(days):
-    """Import purchase history from eBay."""
+    """Import purchase history from eBay API."""
     from src.importer.ebay_import import import_ebay_purchases
     result = import_ebay_purchases(days=days)
     console.print(f"[green]Imported:[/] {result['imported']} cards")
@@ -376,6 +376,22 @@ def import_ebay_cmd(days):
         console.print(f"[red]Errors:[/]")
         for err in result["errors"]:
             console.print(f"  - {err}")
+
+
+@import_group.command("ebay-csv")
+@click.argument("file_path", type=click.Path(exists=True))
+def import_ebay_csv_cmd(file_path):
+    """Import purchase history from an eBay CSV export."""
+    from src.importer.ebay_import import import_ebay_csv
+    result = import_ebay_csv(file_path)
+    console.print(f"[green]Imported:[/] {result['imported']} cards")
+    console.print(f"[yellow]Skipped:[/] {result['skipped']} (duplicates or missing data)")
+    if result["errors"]:
+        console.print(f"[red]Errors:[/]")
+        for err in result["errors"][:20]:
+            console.print(f"  - {err}")
+        if len(result["errors"]) > 20:
+            console.print(f"  ... and {len(result['errors']) - 20} more errors")
 
 
 # ── Targets ─────────────────────────────────────────────────────────

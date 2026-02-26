@@ -122,31 +122,122 @@ def get_ebay_market_price(
 
 
 def calculate_fmv(
+    cardladder_fmv: float | None = None,
+    cardladder_confidence: float = 0,
+    avg_30d: float | None = None,
+    avg_90d: float | None = None,
     ebay_price: float | None = None,
     ebay_confidence: float = 0,
     cardhedge_price: float | None = None,
     cardhedge_num_comps: int = 0,
 ) -> dict:
-    """Calculate FMV from eBay active or Card Hedge data (legacy fallback).
+    """Calculate composite FMV from all available pricing sources.
 
-    For SportsCardsPro pricing, use get_sportscardspro_fmv() directly.
+    Priority waterfall:
+      1. CardLadder FMV + 30d/90d averages (sold data, best signal)
+      2. Card Hedge comps (sold data, good signal when 3+ comps)
+      3. eBay active listings median, discounted 10% (weakest signal)
+
+    Returns dict with: fmv, confidence, source, sources_used,
+    and pass-through values for cardladder_fmv, avg_30d, avg_90d.
     """
-    if cardhedge_price and cardhedge_price > 0 and cardhedge_num_comps >= 3:
+    values = []
+    sources_used = 0
+
+    # Collect available price signals
+    if cardladder_fmv and cardladder_fmv > 0:
+        values.append(cardladder_fmv)
+        sources_used += 1
+
+    if avg_30d and avg_30d > 0:
+        values.append(avg_30d)
+        sources_used += 1
+
+    if avg_90d and avg_90d > 0:
+        values.append(avg_90d)
+        sources_used += 1
+
+    # Card Hedge comps (only if no CardLadder data)
+    if not values and cardhedge_price and cardhedge_price > 0 and cardhedge_num_comps >= 3:
         return {
             "fmv": round(cardhedge_price, 2),
             "confidence": min(cardhedge_num_comps * 15, 95),
             "source": "cardhedge_comps",
+            "sources_used": 1,
+            "cardladder_fmv": None,
+            "avg_30d": avg_30d,
+            "avg_90d": avg_90d,
         }
 
-    if ebay_price and ebay_price > 0:
+    # eBay active listings (only if no CardLadder or CardHedge data)
+    if not values and ebay_price and ebay_price > 0:
         sold_estimate = ebay_price * 0.90
         return {
             "fmv": round(sold_estimate, 2),
             "confidence": round(ebay_confidence * 0.85, 1),
             "source": "ebay_active_discounted",
+            "sources_used": 1,
+            "cardladder_fmv": None,
+            "avg_30d": avg_30d,
+            "avg_90d": avg_90d,
         }
 
-    return {"fmv": 0, "confidence": 0, "source": "none"}
+    # No data at all
+    if not values:
+        return {
+            "fmv": 0,
+            "confidence": 10,
+            "source": "none",
+            "sources_used": 0,
+            "cardladder_fmv": None,
+            "avg_30d": avg_30d,
+            "avg_90d": avg_90d,
+        }
+
+    # Weighted average: CardLadder FMV weighted higher than averages
+    if cardladder_fmv and cardladder_fmv > 0:
+        weights = [2.0]  # CardLadder FMV gets 2x weight
+        weighted = [cardladder_fmv * 2.0]
+        if avg_30d and avg_30d > 0:
+            weights.append(1.5)
+            weighted.append(avg_30d * 1.5)
+        if avg_90d and avg_90d > 0:
+            weights.append(1.0)
+            weighted.append(avg_90d * 1.0)
+        fmv = sum(weighted) / sum(weights)
+    else:
+        # Only averages, no CardLadder FMV
+        if avg_30d and avg_90d:
+            fmv = avg_30d * 0.6 + avg_90d * 0.4
+        elif avg_30d:
+            fmv = avg_30d
+        else:
+            fmv = avg_90d
+
+    # Confidence calculation
+    confidence = cardladder_confidence or 0
+    base_boost = sources_used * 5
+    confidence = confidence + base_boost
+
+    # Agreement bonus/penalty between CardLadder FMV and 30d average
+    if cardladder_fmv and avg_30d and cardladder_fmv > 0:
+        divergence = abs(cardladder_fmv - avg_30d) / cardladder_fmv
+        if divergence <= 0.10:
+            confidence += 10  # close agreement boosts confidence
+        elif divergence > 0.30:
+            confidence -= 10  # large divergence penalizes confidence
+
+    confidence = max(0, min(confidence, 99))
+
+    return {
+        "fmv": round(fmv, 2),
+        "confidence": round(confidence, 1),
+        "source": "cardladder",
+        "sources_used": sources_used,
+        "cardladder_fmv": cardladder_fmv,
+        "avg_30d": avg_30d,
+        "avg_90d": avg_90d,
+    }
 
 
 def calculate_net_profit(sell_price: float, buy_price: float, fee_rate: float = EBAY_SELLER_FEE_RATE) -> dict:

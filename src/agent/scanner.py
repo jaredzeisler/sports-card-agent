@@ -5,7 +5,7 @@ import re
 from config.settings import get_settings
 from src.api.ebay import EbayClient
 from src.api.cardladder import CardLadderClient
-from src.engine.pricing import calculate_fmv
+from src.engine.pricing import calculate_fmv, get_ebay_market_price
 from src.engine.analyzer import DealAnalyzer
 from src.models.database import get_session
 from src.models.card import Listing
@@ -145,6 +145,16 @@ class MarketScanner:
         self.cardladder = CardLadderClient(self.settings)
         self.analyzer = DealAnalyzer(self.settings)
 
+        # Optional pricing clients for waterfall
+        self._scp_client = None
+        self._ch_client = None
+        if self.settings.sportscardspro_api_key:
+            from src.api.sportscardspro import SportsCardsProClient
+            self._scp_client = SportsCardsProClient(self.settings)
+        if self.settings.cardhedge_api_key:
+            from src.api.cardhedge import CardHedgeClient
+            self._ch_client = CardHedgeClient(self.settings)
+
     def scan(self, dry_run: bool = True) -> list[dict]:
         """Run a full market scan across all search queries.
 
@@ -173,6 +183,86 @@ class MarketScanner:
         all_deals.sort(key=lambda d: d["score"], reverse=True)
         return all_deals
 
+    def _get_fmv_waterfall(self, parsed: dict) -> tuple[dict | None, str, int]:
+        """Try pricing sources in waterfall order.
+
+        Returns (fmv_data, trend, population).
+        Waterfall: SportsCardsPro -> CardLadder -> Card Hedge -> eBay active
+        """
+        player = parsed.get("player")
+        year = parsed.get("year")
+        brand = parsed.get("brand")
+        set_name = parsed.get("set_name")
+        grade = parsed.get("grade")
+        sport = parsed.get("sport", "basketball")
+
+        # 1. SportsCardsPro (real sold prices)
+        if self._scp_client:
+            try:
+                scp = self._scp_client.get_fmv(
+                    player=player, year=year, brand=brand,
+                    set_name=set_name, grade=grade,
+                )
+                if scp and scp.get("fmv") and scp["fmv"] > 0:
+                    vol = scp.get("sales_volume", 0)
+                    confidence = min(40 + vol * 0.5, 95) if vol else 50
+                    fmv_data = {
+                        "fmv": scp["fmv"],
+                        "confidence": confidence,
+                        "source": "sportscardspro",
+                        "sources_used": 1,
+                    }
+                    return fmv_data, "stable", 0
+            except Exception:
+                pass
+
+        # 2. CardLadder (FMV + trends)
+        cl_data = self.cardladder.get_fmv(
+            player=player, year=year, brand=brand,
+            set_name=set_name, grade=grade, sport=sport,
+        )
+        if cl_data:
+            fmv_data = calculate_fmv(
+                cardladder_fmv=cl_data.get("fmv"),
+                cardladder_confidence=cl_data.get("confidence", 0),
+                avg_30d=cl_data.get("avg_30d"),
+                avg_90d=cl_data.get("avg_90d"),
+            )
+            if fmv_data["fmv"] > 0:
+                return fmv_data, cl_data.get("trend", "stable"), cl_data.get("population", 0)
+
+        # 3. Card Hedge (sold comps)
+        if self._ch_client:
+            try:
+                ch = self._ch_client.get_fmv(
+                    player=player, year=year, brand=brand,
+                    set_name=set_name, grade=grade, sport=sport,
+                )
+                if ch and ch.get("fmv") and ch["fmv"] > 0:
+                    fmv_data = calculate_fmv(
+                        cardhedge_price=ch["fmv"],
+                        cardhedge_num_comps=ch.get("num_comps", 0),
+                    )
+                    if fmv_data["fmv"] > 0:
+                        return fmv_data, "stable", 0
+            except Exception:
+                pass
+
+        # 4. eBay active listings (last resort)
+        market = get_ebay_market_price(
+            player=player, year=year, brand=brand,
+            set_name=set_name, grade=grade, sport=sport,
+        )
+        if market:
+            fmv_data = calculate_fmv(
+                ebay_price=market["fmv"],
+                ebay_confidence=market["confidence"],
+            )
+            if fmv_data["fmv"] > 0:
+                return fmv_data, "stable", 0
+
+        return None, "stable", 0
+
     def _evaluate_listing(self, item: dict, session) -> dict | None:
         """Evaluate a single eBay listing."""
         try:
@@ -189,30 +279,10 @@ class MarketScanner:
             if not player:
                 return None
 
-            # Get FMV from CardLadder
-            cl_data = self.cardladder.get_fmv(
-                player=player,
-                year=parsed.get("year"),
-                brand=parsed.get("brand"),
-                set_name=parsed.get("set_name"),
-                grade=parsed.get("grade"),
-                sport=parsed.get("sport", "basketball"),
-            )
+            # Get FMV via waterfall (SportsCardsPro -> CardLadder -> CardHedge -> eBay)
+            fmv_data, trend, population = self._get_fmv_waterfall(parsed)
 
-            cl_fmv = cl_data["fmv"] if cl_data else None
-            cl_confidence = cl_data["confidence"] if cl_data else 0
-            trend = cl_data["trend"] if cl_data else "stable"
-            population = cl_data.get("population", 0) if cl_data else 0
-
-            # Calculate FMV from CardLadder recent sales data
-            fmv_data = calculate_fmv(
-                cardladder_fmv=cl_fmv,
-                cardladder_confidence=cl_confidence,
-                avg_30d=cl_data.get("avg_30d") if cl_data else None,
-                avg_90d=cl_data.get("avg_90d") if cl_data else None,
-            )
-
-            if fmv_data["fmv"] <= 0:
+            if not fmv_data or fmv_data["fmv"] <= 0:
                 return None
 
             # Analyze the deal

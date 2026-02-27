@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch process Goldin auction sale results into the inventory DB."""
+"""Batch process Fanatics auction sale results into the inventory DB."""
 
 import sqlite3
 from datetime import datetime
@@ -129,8 +129,8 @@ def main():
         # price = gross proceeds (hammer + buyer's premium)
         # fees = CGC auth fee ($0 or $3)
         c.execute("""INSERT INTO transactions (card_id, transaction_type, price, fees, platform, ebay_order_id, notes, executed_at)
-                     VALUES (?, 'SELL', ?, ?, 'goldin', ?, ?, ?)""",
-                  (card_id, gross, cgc_fee, f"Lot-{lot}", f"Goldin Lot #{lot} — Hammer ${hammer:,.0f} x {split_pct:.0%}", sale_date + "T12:00:00"))
+                     VALUES (?, 'SELL', ?, ?, 'fanatics', ?, ?, ?)""",
+                  (card_id, gross, cgc_fee, f"Lot-{lot}", f"Fanatics Lot #{lot} — Hammer ${hammer:,.0f} x {split_pct:.0%}", sale_date + "T12:00:00"))
 
         # Mark card as sold
         c.execute("UPDATE cards SET status = 'SOLD' WHERE id = ?", (card_id,))
@@ -156,7 +156,7 @@ def main():
 
     # Print results table
     print(f"\n{'='*155}")
-    print(f"{'GOLDIN AUCTION RESULTS — P&L BY LOT':^155}")
+    print(f"{'FANATICS AUCTION RESULTS — P&L BY LOT':^155}")
     print(f"{'='*155}")
     print(f"{'Lot':>5} | {'ID':>5} | {'Player':<30} | {'Year':>4} | {'Hammer':>10} | {'Split':>5} | {'Gross':>10} | {'CGC':>5} | {'Net':>10} | {'Paid':>10} | {'Profit':>10}")
     print(f"{'-'*155}")
@@ -176,7 +176,7 @@ def main():
     print(f"{'MATCHED TOTALS':>44} | ${matched_hammer:>9,.2f} |       | ${matched_gross:>9,.2f} | ${matched_cgc:>4} | ${matched_net:>9,.2f} | ${matched_cost:>9,.2f} | {pm}${matched_profit:>8,.2f}")
 
     print(f"\n{'='*80}")
-    print(f"  GOLDIN AUCTION SUMMARY")
+    print(f"  FANATICS AUCTION SUMMARY")
     print(f"{'='*80}")
     print(f"  Lots matched & recorded:   {len(results)}")
     print(f"  Lots NOT matched:          {len(not_found)}")

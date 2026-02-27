@@ -240,6 +240,76 @@ def inventory_grading_fee(card_ids):
         session.close()
 
 
+@inventory.command("sell")
+@click.argument("card_id", type=int)
+@click.option("--price", required=True, type=float, help="Hammer / sale price received")
+@click.option("--fees", type=float, default=None, help="Platform fees (auto-calculated if omitted)")
+@click.option("--platform", type=click.Choice(["goldin", "fanatics", "ebay", "pwcc", "other"]),
+              required=True, help="Where the card was sold")
+@click.option("--order-id", default=None, help="Lot number or order ID")
+@click.option("--notes", default=None, help="Optional notes")
+def inventory_sell(card_id, price, fees, platform, order_id, notes):
+    """Record a sale (hammer payment from Goldin, Fanatics, etc.)."""
+    from datetime import datetime, timezone
+
+    PLATFORM_FEE_RATES = {
+        "goldin": 0.20,      # ~20% buyer's premium is on buyer, but seller fees ~0%
+        "fanatics": 0.10,    # ~10% seller commission
+        "ebay": 0.1625,      # ~16.25% eBay + payment processing
+        "pwcc": 0.10,        # ~10% seller commission
+        "other": 0.0,
+    }
+
+    session = get_session()
+    try:
+        card = session.query(Card).filter_by(id=card_id).first()
+        if not card:
+            console.print(f"[red]Card #{card_id} not found.[/]")
+            return
+
+        if card.status == CardStatus.SOLD:
+            console.print(f"[yellow]Card #{card_id} is already marked as sold.[/]")
+            return
+
+        # Calculate fees if not provided
+        if fees is None:
+            rate = PLATFORM_FEE_RATES.get(platform, 0)
+            fees = round(price * rate, 2)
+            console.print(f"  [dim]Auto-calculated {platform} fees ({rate:.0%}): ${fees:.2f}[/]")
+
+        net = price - fees
+        paid = card.purchase_price or 0
+        profit = net - paid
+
+        # Create sell transaction
+        txn = Transaction(
+            card_id=card.id,
+            transaction_type=TransactionType.SELL,
+            price=price,
+            fees=fees,
+            platform=platform,
+            ebay_order_id=order_id,
+            notes=notes,
+            executed_at=datetime.now(timezone.utc),
+        )
+        session.add(txn)
+
+        # Mark card as sold
+        card.status = CardStatus.SOLD
+        session.commit()
+
+        profit_color = "green" if profit >= 0 else "red"
+        console.print(f"\n[green]Sold:[/] {card.player[:40]}")
+        console.print(f"  Platform:   {platform}")
+        console.print(f"  Hammer:     ${price:,.2f}")
+        console.print(f"  Fees:       ${fees:,.2f}")
+        console.print(f"  Net:        ${net:,.2f}")
+        console.print(f"  Paid:       ${paid:,.2f}")
+        console.print(f"  Profit:     [{profit_color}]${profit:,.2f}[/]")
+    finally:
+        session.close()
+
+
 # ── Approvals ───────────────────────────────────────────────────────
 
 @cli.group()

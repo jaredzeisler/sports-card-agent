@@ -244,7 +244,7 @@ def inventory_grading_fee(card_ids):
 @click.argument("card_id", type=int)
 @click.option("--price", required=True, type=float, help="Hammer / sale price received")
 @click.option("--fees", type=float, default=None, help="Platform fees (auto-calculated if omitted)")
-@click.option("--platform", type=click.Choice(["goldin", "fanatics", "ebay", "pwcc", "other"]),
+@click.option("--platform", type=click.Choice(["goldin", "fanatics", "dcsports", "ebay", "pwcc", "other"]),
               required=True, help="Where the card was sold")
 @click.option("--order-id", default=None, help="Lot number or order ID")
 @click.option("--notes", default=None, help="Optional notes")
@@ -253,8 +253,9 @@ def inventory_sell(card_id, price, fees, platform, order_id, notes):
     from datetime import datetime, timezone
 
     PLATFORM_FEE_RATES = {
-        "goldin": 0.20,      # ~20% buyer's premium is on buyer, but seller fees ~0%
-        "fanatics": 0.10,    # ~10% seller commission
+        "goldin": 0.0,       # No seller fees — you collect buyer's premium
+        "fanatics": 0.0,     # Roughly breakeven on fees
+        "dcsports": 0.0,     # DC Sports consignment
         "ebay": 0.1625,      # ~16.25% eBay + payment processing
         "pwcc": 0.10,        # ~10% seller commission
         "other": 0.0,

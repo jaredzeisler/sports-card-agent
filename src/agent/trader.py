@@ -246,10 +246,17 @@ class TradingAgent:
             session.close()
 
     def _get_total_invested(self, session) -> float:
-        """Get total amount currently invested in cards."""
+        """Get total amount currently invested in cards.
+
+        Excludes returned items, grading fees, and non-card entries.
+        """
         cards = (
             session.query(Card)
             .filter(Card.status == CardStatus.IN_COLLECTION)
             .all()
         )
-        return sum(c.purchase_price or 0 for c in cards)
+        return sum(
+            c.purchase_price or 0
+            for c in cards
+            if not (c.notes and "[NOT A CARD]" in c.notes)
+        )

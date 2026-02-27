@@ -12,6 +12,8 @@ class CardStatus(enum.Enum):
     IN_COLLECTION = "in_collection"
     LISTED = "listed"
     SOLD = "sold"
+    RETURNED = "returned"
+    GRADING_FEE = "grading_fee"
 
 
 class TransactionType(enum.Enum):

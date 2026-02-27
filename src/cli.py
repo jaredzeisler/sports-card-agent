@@ -100,7 +100,7 @@ def inventory():
 
 
 @inventory.command("list")
-@click.option("--status", type=click.Choice(["all", "in_collection", "listed", "sold"]), default="all")
+@click.option("--status", type=click.Choice(["all", "in_collection", "listed", "sold", "returned", "grading_fee"]), default="all")
 def inventory_list(status):
     """List cards in your inventory."""
     session = get_session()
@@ -180,6 +180,62 @@ def inventory_add(player, year, brand, set_name, variation, card_number, sport, 
         session.add(card)
         session.commit()
         console.print(f"[green]Added:[/] {card}")
+    finally:
+        session.close()
+
+
+@inventory.command("return")
+@click.argument("card_ids", nargs=-1, type=int, required=True)
+def inventory_return(card_ids):
+    """Mark cards as returned/refunded (removes from invested total)."""
+    session = get_session()
+    try:
+        updated = 0
+        for card_id in card_ids:
+            card = session.query(Card).filter_by(id=card_id).first()
+            if not card:
+                console.print(f"[red]Card #{card_id} not found.[/]")
+                continue
+            if card.status == CardStatus.RETURNED:
+                console.print(f"[yellow]Card #{card_id} already marked as returned.[/]")
+                continue
+            old_status = card.status.value if hasattr(card.status, 'value') else str(card.status)
+            card.status = CardStatus.RETURNED
+            updated += 1
+            console.print(
+                f"[green]#{card_id}[/] {card.player[:40]} "
+                f"(${card.purchase_price or 0:.2f}) — {old_status} → returned"
+            )
+        session.commit()
+        if updated:
+            console.print(f"\n[green]{updated} card(s) marked as returned.[/]")
+    finally:
+        session.close()
+
+
+@inventory.command("grading-fee")
+@click.argument("card_ids", nargs=-1, type=int, required=True)
+def inventory_grading_fee(card_ids):
+    """Mark entries as PSA/grading fees (separates from card investment)."""
+    session = get_session()
+    try:
+        updated = 0
+        for card_id in card_ids:
+            card = session.query(Card).filter_by(id=card_id).first()
+            if not card:
+                console.print(f"[red]Card #{card_id} not found.[/]")
+                continue
+            if card.status == CardStatus.GRADING_FEE:
+                console.print(f"[yellow]Card #{card_id} already marked as grading fee.[/]")
+                continue
+            card.status = CardStatus.GRADING_FEE
+            updated += 1
+            console.print(
+                f"[green]#{card_id}[/] {card.player[:40]} (${card.purchase_price or 0:.2f}) → grading_fee"
+            )
+        session.commit()
+        if updated:
+            console.print(f"\n[green]{updated} entry/entries marked as grading fees.[/]")
     finally:
         session.close()
 
@@ -269,11 +325,25 @@ def portfolio():
         cards = session.query(Card).all()
         transactions = session.query(Transaction).all()
 
-        in_collection = [c for c in cards if c.status == CardStatus.IN_COLLECTION]
+        in_collection = [
+            c for c in cards
+            if c.status == CardStatus.IN_COLLECTION
+            and not (c.notes and "[NOT A CARD]" in c.notes)
+        ]
         sold = [c for c in cards if c.status == CardStatus.SOLD]
+        returned = [c for c in cards if c.status == CardStatus.RETURNED]
+        grading_fees = [c for c in cards if c.status == CardStatus.GRADING_FEE]
+        non_cards = [
+            c for c in cards
+            if c.status == CardStatus.IN_COLLECTION
+            and c.notes and "[NOT A CARD]" in c.notes
+        ]
 
         total_invested = sum(c.purchase_price or 0 for c in in_collection)
         total_fmv = sum(c.current_fmv or c.purchase_price or 0 for c in in_collection)
+        total_returned = sum(c.purchase_price or 0 for c in returned)
+        total_grading = sum(c.purchase_price or 0 for c in grading_fees)
+        total_non_cards = sum(c.purchase_price or 0 for c in non_cards)
 
         buy_txns = [t for t in transactions if t.transaction_type == TransactionType.BUY]
         sell_txns = [t for t in transactions if t.transaction_type == TransactionType.SELL]
@@ -289,13 +359,25 @@ def portfolio():
         console.print("\n[bold]Portfolio Summary[/]\n")
         console.print(f"  Cards in collection: {len(in_collection)}")
         console.print(f"  Cards sold:          {len(sold)}")
-        console.print(f"  Total invested:      ${total_invested:,.2f}")
-        console.print(f"  Current FMV:         ${total_fmv:,.2f}")
-        console.print(f"  Unrealized P&L:      ${unrealized_pnl:,.2f}")
-        console.print(f"  Realized P&L:        ${realized_pnl:,.2f}")
-        console.print(f"  Total bought:        ${total_bought:,.2f}")
-        console.print(f"  Total sold:          ${total_sold:,.2f}")
-        console.print(f"  Total fees:          ${total_fees:,.2f}")
+        console.print(f"  Cards returned:      {len(returned):>6}   (${total_returned:>12,.2f})")
+        console.print(f"  Grading fees:        {len(grading_fees):>6}   (${total_grading:>12,.2f})")
+        if non_cards:
+            console.print(f"  Non-card items:      {len(non_cards):>6}   (${total_non_cards:>12,.2f})")
+        console.print()
+        console.print(f"  Total invested (cards only): ${total_invested:,.2f}")
+        console.print(f"  Current FMV:                 ${total_fmv:,.2f}")
+        console.print(f"  Unrealized P&L:              ${unrealized_pnl:,.2f}")
+        console.print(f"  Realized P&L:                ${realized_pnl:,.2f}")
+        console.print()
+        console.print(f"  Total spent on eBay:   ${total_bought:,.2f}")
+        console.print(f"  Less returns:         -${total_returned:,.2f}")
+        console.print(f"  Less grading fees:    -${total_grading:,.2f}")
+        console.print(f"  Less non-card items:  -${total_non_cards:,.2f}")
+        console.print(f"                         {'─' * 15}")
+        net_card_spend = total_bought - total_returned - total_grading - total_non_cards
+        console.print(f"  Net card investment:   ${net_card_spend:,.2f}")
+        console.print(f"  Total sold:            ${total_sold:,.2f}")
+        console.print(f"  Total sell fees:       ${total_fees:,.2f}")
         console.print()
     finally:
         session.close()

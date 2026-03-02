@@ -122,28 +122,25 @@ class TradingAgent:
             notify_error("Buy execution", str(e))
 
     def _execute_sell(self, card: Card, target_price: float, session):
-        """List a card for sale on eBay."""
+        """List a card for sale on eBay using the listing builder."""
+        from src.engine.listing_builder import build_card_listing, calculate_list_price
+
         try:
-            title = f"{card.year} {card.brand} {card.set_name} {card.player}"
-            if card.graded:
-                title += f" PSA {int(card.grade)}"
+            card_data = build_card_listing(card)
+            pricing = calculate_list_price(card)
+            sku = f"card-{card.id}"
 
             result = self.ebay.create_listing(
-                title=title,
-                description=f"Authenticated {card.grading_company} {card.grade} grade card.",
+                card_data=card_data,
                 price=target_price,
-                sku=f"card-{card.id}",
+                sku=sku,
+                best_offer=True,
+                auto_accept_price=pricing["auto_accept"],
+                auto_decline_price=pricing["auto_decline"],
             )
 
             card.status = CardStatus.LISTED
-            txn = Transaction(
-                card_id=card.id,
-                transaction_type=TransactionType.SELL,
-                price=target_price,
-                fees=round(target_price * 0.1625, 2),
-                platform="ebay",
-            )
-            session.add(txn)
+            card.ebay_item_id = result.get("listingId")
             session.commit()
             notify_trade_executed("sell", card.player, target_price)
 

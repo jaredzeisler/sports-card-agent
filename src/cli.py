@@ -244,7 +244,7 @@ def inventory_grading_fee(card_ids):
 @click.argument("card_id", type=int)
 @click.option("--price", required=True, type=float, help="Hammer / sale price received")
 @click.option("--fees", type=float, default=None, help="Platform fees (auto-calculated if omitted)")
-@click.option("--platform", type=click.Choice(["goldin", "fanatics", "dcsports", "ebay", "pwcc", "other"]),
+@click.option("--platform", type=click.Choice(["ebay", "fanatics", "psa_direct", "pwcc", "other"]),
               required=True, help="Where the card was sold")
 @click.option("--order-id", default=None, help="Lot number or order ID")
 @click.option("--notes", default=None, help="Optional notes")
@@ -253,10 +253,9 @@ def inventory_sell(card_id, price, fees, platform, order_id, notes):
     from datetime import datetime, timezone
 
     PLATFORM_FEE_RATES = {
-        "goldin": 0.0,       # No seller fees — you collect buyer's premium
-        "fanatics": 0.0,     # Roughly breakeven on fees
-        "dcsports": 0.0,     # DC Sports consignment
         "ebay": 0.1625,      # ~16.25% eBay + payment processing
+        "fanatics": 0.0,     # Auction fees vary per lot
+        "psa_direct": 0.0,   # Direct sales to PSA affiliates
         "pwcc": 0.10,        # ~10% seller commission
         "other": 0.0,
     }
@@ -731,6 +730,436 @@ def flag_mismatches_cmd(min_paid, low_threshold, high_threshold):
 
     if s["flagged"] == 0:
         console.print("[green]All cards look clean![/]")
+
+
+# ── eBay Selling ───────────────────────────────────────────────────
+
+@cli.group()
+def ebay():
+    """eBay selling commands — list cards, manage prices, handle offers."""
+    pass
+
+
+@ebay.command("auth")
+@click.option("--port", default=8471, help="Local port for OAuth callback")
+def ebay_auth(port):
+    """Authenticate with eBay (opens browser for OAuth consent)."""
+    from src.api.ebay_auth import start_auth_flow
+    try:
+        tokens = start_auth_flow(port=port)
+        console.print(f"[green]Authenticated successfully![/]")
+        console.print(f"  Access token expires in {tokens['expires_in'] // 3600}h")
+        console.print(f"  Refresh token saved for long-term use")
+    except Exception as e:
+        console.print(f"[red]Authentication failed:[/] {e}")
+
+
+@ebay.command("list-card")
+@click.argument("card_id", type=int)
+@click.option("--price", type=float, help="Listing price (auto-calculated if omitted)")
+@click.option("--margin", type=float, default=0.20, help="Target profit margin (default 20%)")
+@click.option("--best-offer/--no-best-offer", default=True, help="Enable best offer")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be listed without posting")
+def ebay_list_card(card_id, price, margin, best_offer, dry_run):
+    """List a card from inventory on eBay."""
+    from src.api.ebay import EbayClient
+    from src.engine.listing_builder import build_card_listing, calculate_list_price
+
+    session = get_session()
+    try:
+        card = session.query(Card).filter_by(id=card_id).first()
+        if not card:
+            console.print(f"[red]Card #{card_id} not found.[/]")
+            return
+
+        if card.status == CardStatus.SOLD:
+            console.print(f"[red]Card #{card_id} is already sold.[/]")
+            return
+
+        if card.status == CardStatus.LISTED:
+            console.print(f"[yellow]Card #{card_id} is already listed on eBay.[/]")
+            return
+
+        # Build listing data
+        card_data = build_card_listing(card)
+        pricing = calculate_list_price(card, target_margin=margin)
+
+        list_price = price or pricing["list_price"]
+        est_fees = round(list_price * 0.1625, 2)
+        est_net = round(list_price - est_fees, 2)
+        est_profit = round(est_net - (card.purchase_price or 0), 2)
+
+        # Show preview
+        console.print(f"\n[bold]Listing Preview[/]")
+        console.print(f"  Title:        {card_data['title']}")
+        console.print(f"  Condition:    {card_data['condition_description'][:60] or card_data['condition']}")
+        console.print(f"  Cost basis:   ${card.purchase_price or 0:,.2f}")
+        console.print(f"  List price:   ${list_price:,.2f}")
+        console.print(f"  Est. fees:    ${est_fees:,.2f}")
+        console.print(f"  Est. net:     ${est_net:,.2f}")
+        profit_color = "green" if est_profit >= 0 else "red"
+        console.print(f"  Est. profit:  [{profit_color}]${est_profit:,.2f}[/]")
+
+        if best_offer:
+            console.print(f"  Auto-accept:  ${pricing['auto_accept']:,.2f}")
+            console.print(f"  Auto-decline: ${pricing['auto_decline']:,.2f}")
+
+        # Aspects
+        console.print(f"\n  [dim]Item Specifics:[/]")
+        for key, vals in card_data["aspects"].items():
+            console.print(f"    {key}: {', '.join(vals)}")
+
+        if dry_run:
+            console.print(f"\n[yellow]DRY RUN — listing not created.[/]")
+            return
+
+        # Create the listing
+        ebay_client = EbayClient()
+        sku = f"card-{card.id}"
+
+        result = ebay_client.create_listing(
+            card_data=card_data,
+            price=list_price,
+            sku=sku,
+            best_offer=best_offer,
+            auto_accept_price=pricing["auto_accept"] if best_offer else None,
+            auto_decline_price=pricing["auto_decline"] if best_offer else None,
+        )
+
+        # Update card status
+        card.status = CardStatus.LISTED
+        card.ebay_item_id = result.get("listingId")
+        session.commit()
+
+        console.print(f"\n[green]Listed on eBay![/]")
+        console.print(f"  Listing ID: {result.get('listingId')}")
+        console.print(f"  SKU: {sku}")
+
+    finally:
+        session.close()
+
+
+@ebay.command("bulk-list")
+@click.option("--min-profit", type=float, default=15.0, help="Min profit % to list")
+@click.option("--margin", type=float, default=0.20, help="Target profit margin")
+@click.option("--limit", type=int, default=10, help="Max cards to list")
+@click.option("--dry-run", is_flag=True, default=True, help="Preview only (default)")
+@click.option("--live", is_flag=True, default=False, help="Actually create listings")
+def ebay_bulk_list(min_profit, margin, limit, dry_run, live):
+    """List multiple cards from inventory based on profit targets."""
+    from src.engine.listing_builder import build_card_listing, calculate_list_price
+
+    if live:
+        dry_run = False
+
+    session = get_session()
+    try:
+        cards = (
+            session.query(Card)
+            .filter(Card.status == CardStatus.IN_COLLECTION)
+            .filter(Card.purchase_price > 0)
+            .filter(Card.current_fmv.isnot(None))
+            .all()
+        )
+
+        candidates = []
+        for card in cards:
+            if card.notes and "[NOT A CARD]" in card.notes:
+                continue
+            pricing = calculate_list_price(card, target_margin=margin)
+            if pricing["cost_basis"] > 0:
+                margin_pct = (pricing["est_profit"] / pricing["cost_basis"]) * 100
+                if margin_pct >= min_profit:
+                    candidates.append((card, pricing, margin_pct))
+
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        candidates = candidates[:limit]
+
+        if not candidates:
+            console.print("No cards meet the profit threshold for listing.")
+            return
+
+        table = Table(title=f"{'[DRY RUN] ' if dry_run else ''}Bulk Listing ({len(candidates)} cards)")
+        table.add_column("ID", justify="right")
+        table.add_column("Player", style="cyan")
+        table.add_column("Grade")
+        table.add_column("Cost", justify="right")
+        table.add_column("List Price", justify="right")
+        table.add_column("Est. Net", justify="right")
+        table.add_column("Profit", justify="right")
+        table.add_column("Margin", justify="right")
+
+        for card, pricing, margin_pct in candidates:
+            grade_str = f"PSA {int(card.grade)}" if card.graded and card.grade else "-"
+            profit_color = "green" if pricing["est_profit"] >= 0 else "red"
+            table.add_row(
+                str(card.id),
+                card.player[:25],
+                grade_str,
+                f"${pricing['cost_basis']:,.2f}",
+                f"${pricing['list_price']:,.2f}",
+                f"${pricing['est_net']:,.2f}",
+                f"[{profit_color}]${pricing['est_profit']:,.2f}[/]",
+                f"{margin_pct:.1f}%",
+            )
+
+        console.print(table)
+
+        if dry_run:
+            console.print(f"\n[yellow]DRY RUN — run with --live to create listings.[/]")
+            return
+
+        # Actually list them
+        from src.api.ebay import EbayClient
+        ebay_client = EbayClient()
+        listed = 0
+        errors = 0
+
+        for card, pricing, _ in candidates:
+            try:
+                card_data = build_card_listing(card)
+                sku = f"card-{card.id}"
+                result = ebay_client.create_listing(
+                    card_data=card_data,
+                    price=pricing["list_price"],
+                    sku=sku,
+                    best_offer=True,
+                    auto_accept_price=pricing["auto_accept"],
+                    auto_decline_price=pricing["auto_decline"],
+                )
+                card.status = CardStatus.LISTED
+                card.ebay_item_id = result.get("listingId")
+                listed += 1
+                console.print(f"  [green]Listed:[/] {card.player[:30]} @ ${pricing['list_price']:,.2f}")
+            except Exception as e:
+                errors += 1
+                console.print(f"  [red]Failed:[/] {card.player[:30]} — {e}")
+
+        session.commit()
+        console.print(f"\n[green]{listed} listed[/], [red]{errors} errors[/]")
+
+    finally:
+        session.close()
+
+
+@ebay.command("active")
+def ebay_active():
+    """Show cards currently listed on eBay."""
+    session = get_session()
+    try:
+        listed = (
+            session.query(Card)
+            .filter(Card.status == CardStatus.LISTED)
+            .order_by(Card.updated_at.desc())
+            .all()
+        )
+
+        if not listed:
+            console.print("No cards currently listed on eBay.")
+            return
+
+        table = Table(title=f"Active eBay Listings ({len(listed)})")
+        table.add_column("ID", justify="right")
+        table.add_column("Player", style="cyan")
+        table.add_column("Year")
+        table.add_column("Grade")
+        table.add_column("Cost", justify="right")
+        table.add_column("FMV", justify="right")
+        table.add_column("eBay Item ID")
+
+        for card in listed:
+            grade_str = f"PSA {int(card.grade)}" if card.graded and card.grade else "-"
+            fmv_str = f"${card.current_fmv:,.2f}" if card.current_fmv else "-"
+            table.add_row(
+                str(card.id),
+                card.player[:25],
+                str(card.year or "-"),
+                grade_str,
+                f"${card.purchase_price or 0:,.2f}",
+                fmv_str,
+                card.ebay_item_id or "-",
+            )
+
+        console.print(table)
+    finally:
+        session.close()
+
+
+@ebay.command("update-price")
+@click.argument("card_id", type=int)
+@click.option("--price", required=True, type=float, help="New listing price")
+def ebay_update_price(card_id, price):
+    """Update the price on an active eBay listing."""
+    from src.api.ebay import EbayClient
+
+    session = get_session()
+    try:
+        card = session.query(Card).filter_by(id=card_id).first()
+        if not card:
+            console.print(f"[red]Card #{card_id} not found.[/]")
+            return
+        if card.status != CardStatus.LISTED:
+            console.print(f"[red]Card #{card_id} is not currently listed (status: {card.status}).[/]")
+            return
+
+        ebay_client = EbayClient()
+        sku = f"card-{card.id}"
+        offers = ebay_client.get_offers(sku=sku)
+
+        if not offers:
+            console.print(f"[red]No eBay offer found for SKU {sku}.[/]")
+            return
+
+        offer_id = offers[0]["offerId"]
+        ebay_client.update_offer_price(offer_id, price)
+
+        est_fees = round(price * 0.1625, 2)
+        est_net = round(price - est_fees, 2)
+        est_profit = round(est_net - (card.purchase_price or 0), 2)
+        profit_color = "green" if est_profit >= 0 else "red"
+
+        console.print(f"[green]Price updated![/]")
+        console.print(f"  {card.player[:40]}")
+        console.print(f"  New price:   ${price:,.2f}")
+        console.print(f"  Est. net:    ${est_net:,.2f}")
+        console.print(f"  Est. profit: [{profit_color}]${est_profit:,.2f}[/]")
+
+    finally:
+        session.close()
+
+
+@ebay.command("end-listing")
+@click.argument("card_id", type=int)
+def ebay_end_listing(card_id):
+    """End (withdraw) an active eBay listing."""
+    from src.api.ebay import EbayClient
+
+    session = get_session()
+    try:
+        card = session.query(Card).filter_by(id=card_id).first()
+        if not card:
+            console.print(f"[red]Card #{card_id} not found.[/]")
+            return
+        if card.status != CardStatus.LISTED:
+            console.print(f"[red]Card #{card_id} is not currently listed.[/]")
+            return
+
+        ebay_client = EbayClient()
+        sku = f"card-{card.id}"
+        offers = ebay_client.get_offers(sku=sku)
+
+        if not offers:
+            console.print(f"[yellow]No eBay offer found for SKU {sku}. Updating status only.[/]")
+        else:
+            for offer in offers:
+                try:
+                    ebay_client.withdraw_offer(offer["offerId"])
+                except Exception as e:
+                    console.print(f"[yellow]Could not withdraw offer {offer['offerId']}: {e}[/]")
+
+        card.status = CardStatus.IN_COLLECTION
+        card.ebay_item_id = None
+        session.commit()
+        console.print(f"[green]Listing ended.[/] {card.player[:40]} returned to collection.")
+
+    finally:
+        session.close()
+
+
+@ebay.command("policies")
+def ebay_policies():
+    """Show your eBay seller policies (shipping, returns, payment)."""
+    from src.api.ebay import EbayClient
+
+    ebay_client = EbayClient()
+
+    console.print("\n[bold]Fulfillment (Shipping) Policies[/]")
+    try:
+        for p in ebay_client.get_fulfillment_policies():
+            console.print(f"  ID: {p['fulfillmentPolicyId']}  Name: {p.get('name', 'N/A')}")
+    except Exception as e:
+        console.print(f"  [red]{e}[/]")
+
+    console.print("\n[bold]Return Policies[/]")
+    try:
+        for p in ebay_client.get_return_policies():
+            console.print(f"  ID: {p['returnPolicyId']}  Name: {p.get('name', 'N/A')}")
+    except Exception as e:
+        console.print(f"  [red]{e}[/]")
+
+    console.print("\n[bold]Payment Policies[/]")
+    try:
+        for p in ebay_client.get_payment_policies():
+            console.print(f"  ID: {p['paymentPolicyId']}  Name: {p.get('name', 'N/A')}")
+    except Exception as e:
+        console.print(f"  [red]{e}[/]")
+
+
+@ebay.command("sync-sold")
+@click.option("--days", default=30, help="Days of order history to check")
+def ebay_sync_sold(days):
+    """Sync sold items from eBay — records transactions for cards sold on eBay."""
+    from src.api.ebay import EbayClient
+
+    ebay_client = EbayClient()
+    session = get_session()
+    try:
+        orders = ebay_client.get_seller_orders(days=days)
+        synced = 0
+
+        for order in orders:
+            for item in order.get("lineItems", []):
+                sku = item.get("sku", "")
+                if not sku.startswith("card-"):
+                    continue
+
+                card_id = int(sku.replace("card-", ""))
+                card = session.query(Card).filter_by(id=card_id).first()
+                if not card or card.status == CardStatus.SOLD:
+                    continue
+
+                sale_price = float(item.get("total", {}).get("value", 0))
+                if sale_price <= 0:
+                    continue
+
+                fees = round(sale_price * 0.1625, 2)
+                order_id = order.get("orderId", "")
+
+                # Check if transaction already exists
+                existing = (
+                    session.query(Transaction)
+                    .filter_by(card_id=card_id, transaction_type=TransactionType.SELL)
+                    .first()
+                )
+                if existing:
+                    continue
+
+                txn = Transaction(
+                    card_id=card_id,
+                    transaction_type=TransactionType.SELL,
+                    price=sale_price,
+                    fees=fees,
+                    platform="ebay",
+                    ebay_order_id=order_id,
+                    notes=f"Synced from eBay order {order_id}",
+                )
+                session.add(txn)
+                card.status = CardStatus.SOLD
+                synced += 1
+
+                net = sale_price - fees
+                profit = net - (card.purchase_price or 0)
+                profit_color = "green" if profit >= 0 else "red"
+                console.print(
+                    f"  [green]Synced:[/] {card.player[:30]} — "
+                    f"sold ${sale_price:,.2f}, net ${net:,.2f}, "
+                    f"[{profit_color}]profit ${profit:,.2f}[/]"
+                )
+
+        session.commit()
+        console.print(f"\n[green]{synced} sales synced from eBay.[/]")
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":

@@ -121,7 +121,7 @@ class TradingAgent:
             session.rollback()
             notify_error("Buy execution", str(e))
 
-    def _execute_sell(self, card: Card, target_price: float, session):
+    def _execute_sell(self, card: Card, target_price: float, session, test_listing: bool = False):
         """List a card for sale on eBay using the listing builder."""
         from src.engine.listing_builder import build_card_listing, calculate_list_price
 
@@ -137,6 +137,7 @@ class TradingAgent:
                 best_offer=True,
                 auto_accept_price=pricing["auto_accept"],
                 auto_decline_price=pricing["auto_decline"],
+                test_listing=test_listing,
             )
 
             card.status = CardStatus.LISTED

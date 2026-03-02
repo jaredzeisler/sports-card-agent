@@ -594,6 +594,7 @@ def targets(min_profit):
     console.print(table)
 
 
+
 # ── Update FMV ─────────────────────────────────────────────────────
 
 @cli.command("update-fmv")
@@ -760,7 +761,8 @@ def ebay_auth(port):
 @click.option("--margin", type=float, default=0.20, help="Target profit margin (default 20%)")
 @click.option("--best-offer/--no-best-offer", default=True, help="Enable best offer")
 @click.option("--dry-run", is_flag=True, default=False, help="Show what would be listed without posting")
-def ebay_list_card(card_id, price, margin, best_offer, dry_run):
+@click.option("--test", is_flag=True, default=False, help="Use Test Auctions category per eBay test listing policy")
+def ebay_list_card(card_id, price, margin, best_offer, dry_run, test):
     """List a card from inventory on eBay."""
     from src.api.ebay import EbayClient
     from src.engine.listing_builder import build_card_listing, calculate_list_price
@@ -824,6 +826,7 @@ def ebay_list_card(card_id, price, margin, best_offer, dry_run):
             best_offer=best_offer,
             auto_accept_price=pricing["auto_accept"] if best_offer else None,
             auto_decline_price=pricing["auto_decline"] if best_offer else None,
+            test_listing=test,
         )
 
         # Update card status
@@ -845,7 +848,8 @@ def ebay_list_card(card_id, price, margin, best_offer, dry_run):
 @click.option("--limit", type=int, default=10, help="Max cards to list")
 @click.option("--dry-run", is_flag=True, default=True, help="Preview only (default)")
 @click.option("--live", is_flag=True, default=False, help="Actually create listings")
-def ebay_bulk_list(min_profit, margin, limit, dry_run, live):
+@click.option("--test", is_flag=True, default=False, help="Use Test Auctions category per eBay test listing policy")
+def ebay_bulk_list(min_profit, margin, limit, dry_run, live, test):
     """List multiple cards from inventory based on profit targets."""
     from src.engine.listing_builder import build_card_listing, calculate_list_price
 
@@ -926,6 +930,7 @@ def ebay_bulk_list(min_profit, margin, limit, dry_run, live):
                     best_offer=True,
                     auto_accept_price=pricing["auto_accept"],
                     auto_decline_price=pricing["auto_decline"],
+                    test_listing=test,
                 )
                 card.status = CardStatus.LISTED
                 card.ebay_item_id = result.get("listingId")

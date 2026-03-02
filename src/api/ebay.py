@@ -12,6 +12,7 @@ class EbayClient:
     """Client for eBay REST APIs (search, buy, sell, manage listings)."""
 
     SPORTS_CARDS_CATEGORY = "261328"
+    TEST_AUCTIONS_CATEGORY = "178993"  # Everything Else > Test Auctions > General
     EBAY_FEE_RATE = 0.1625  # ~16.25% final value + payment processing
 
     def __init__(self, settings=None):
@@ -131,19 +132,29 @@ class EbayClient:
 
     # ── Sell / Inventory API ────────────────────────────────────────
 
-    def create_inventory_item(self, sku: str, card_data: dict) -> None:
+    def create_inventory_item(self, sku: str, card_data: dict, test_listing: bool = False) -> None:
         """Create or update an inventory item from card data.
+
+        If test_listing=True, prepends 'Test' to title/description per eBay policy.
 
         card_data keys: title, description, condition, condition_descriptors,
                         image_urls, aspects
         """
+        title = card_data["title"]
+        description = card_data.get("description", "")
+        if test_listing:
+            if not title.lower().startswith("test"):
+                title = f"Test - {title}"
+            if not description.lower().startswith("test"):
+                description = f"Test - {description}"
+
         payload = {
             "availability": {"shipToLocationAvailability": {"quantity": 1}},
             "condition": card_data.get("condition", "4000"),
             "conditionDescription": card_data.get("condition_description", ""),
             "product": {
-                "title": card_data["title"],
-                "description": card_data.get("description", ""),
+                "title": title,
+                "description": description,
                 "imageUrls": card_data.get("image_urls", []),
                 "aspects": card_data.get("aspects", {}),
             },
@@ -173,8 +184,15 @@ class EbayClient:
         best_offer: bool = True,
         auto_accept_price: float | None = None,
         auto_decline_price: float | None = None,
+        test_listing: bool = False,
     ) -> str:
-        """Create an offer for an inventory item. Returns offer ID."""
+        """Create an offer for an inventory item. Returns offer ID.
+
+        If test_listing=True, uses Test Auctions category.
+        """
+        if test_listing and not category_id:
+            category_id = self.TEST_AUCTIONS_CATEGORY
+
         payload: dict = {
             "sku": sku,
             "marketplaceId": "EBAY_US",
@@ -235,15 +253,17 @@ class EbayClient:
         fulfillment_policy_id: str | None = None,
         return_policy_id: str | None = None,
         payment_policy_id: str | None = None,
+        test_listing: bool = False,
     ) -> dict:
         """Full listing flow: create inventory item → offer → publish.
 
         card_data: dict from build_card_listing()
+        If test_listing=True, uses Test Auctions category and 'Test' prefix per eBay policy.
         Returns: {"sku": ..., "offerId": ..., "listingId": ...}
         """
         sku = sku or f"card-{int(datetime.now(timezone.utc).timestamp())}"
 
-        self.create_inventory_item(sku, card_data)
+        self.create_inventory_item(sku, card_data, test_listing=test_listing)
 
         offer_id = self.create_offer(
             sku=sku,
@@ -255,6 +275,7 @@ class EbayClient:
             best_offer=best_offer,
             auto_accept_price=auto_accept_price,
             auto_decline_price=auto_decline_price,
+            test_listing=test_listing,
         )
 
         result = self.publish_offer(offer_id)

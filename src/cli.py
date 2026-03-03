@@ -600,8 +600,8 @@ def targets(min_profit):
 @cli.command("update-fmv")
 @click.option("--dry-run", is_flag=True, default=False, help="Don't write to DB")
 @click.option("--delay", default=1.0, help="Seconds between API calls")
-@click.option("--source", type=click.Choice(["auto", "sportscardspro", "cardhedge", "ebay"]), default="auto",
-              help="Pricing source (auto: SportsCardsPro -> Card Hedge -> eBay)")
+@click.option("--source", type=click.Choice(["auto", "sportscardspro", "cardladder", "cardhedge", "ebay"]), default="auto",
+              help="Pricing source (auto: SportsCardsPro -> CardLadder -> Card Hedge)")
 def update_fmv_cmd(dry_run, delay, source):
     """Update fair market values for all cards in inventory."""
     from src.engine.fmv_update import update_all_fmv

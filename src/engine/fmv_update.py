@@ -2,8 +2,11 @@
 
 Pricing waterfall:
   1. SportsCardsPro — real eBay sold prices by exact grade (best)
-  2. Card Hedge comps — time-weighted eBay sold prices
-  3. eBay Browse API — active listing median, discounted 10%
+  2. CardLadder — FMV + 30d/90d averages from recent sales
+  3. Card Hedge comps — time-weighted eBay sold prices
+
+eBay active listings (Buy It Now) are only used if explicitly requested
+via source="ebay", never in the default "auto" waterfall.
 """
 
 import time
@@ -44,6 +47,45 @@ def _try_sportscardspro(card, settings) -> dict | None:
             "product_id": result.get("product_id"),
         }
     return None
+
+
+def _try_cardladder(card, settings) -> dict | None:
+    """Try CardLadder for FMV + 30d/90d averages (sold data)."""
+    if not settings.cardladder_api_key:
+        return None
+
+    from src.api.cardladder import CardLadderClient
+    client = CardLadderClient(settings)
+    result = client.get_fmv(
+        player=card.player,
+        year=card.year,
+        brand=card.brand,
+        set_name=card.set_name,
+        grade=card.grade,
+        sport=card.sport or "basketball",
+    )
+    if not result or not result.get("fmv") or result["fmv"] <= 0:
+        return None
+
+    fmv_data = calculate_fmv(
+        cardladder_fmv=result.get("fmv"),
+        cardladder_confidence=result.get("confidence", 0),
+        avg_30d=result.get("avg_30d"),
+        avg_90d=result.get("avg_90d"),
+    )
+    if fmv_data["fmv"] <= 0:
+        return None
+
+    trend = result.get("trend", "stable")
+    pop = result.get("population", 0)
+    avg_30 = result.get("avg_30d", 0)
+    return {
+        "fmv": fmv_data["fmv"],
+        "confidence": fmv_data["confidence"],
+        "source": "cardladder",
+        "num_comps": 0,
+        "detail": f"${fmv_data['fmv']:.2f} (30d ${avg_30:.2f}, trend={trend}, pop={pop})",
+    }
 
 
 def _try_cardhedge(card, settings) -> dict | None:
@@ -121,8 +163,8 @@ def update_all_fmv(
     Args:
         dry_run: If True, don't write to DB
         delay: Seconds between API calls (rate limiting)
-        source: "auto" (SportsCardsPro -> CardHedge -> eBay),
-                "sportscardspro", "cardhedge", or "ebay"
+        source: "auto" (SportsCardsPro -> CardLadder -> CardHedge, no eBay BIN),
+                "sportscardspro", "cardladder", "cardhedge", or "ebay"
 
     Returns dict with: updated, skipped, no_data, errors, by_source
     """
@@ -145,10 +187,10 @@ def update_all_fmv(
             parts = []
             if settings.sportscardspro_api_key:
                 parts.append("SportsCardsPro")
+            if settings.cardladder_api_key:
+                parts.append("CardLadder")
             if settings.cardhedge_api_key:
                 parts.append("Card Hedge")
-            if settings.ebay_app_id:
-                parts.append("eBay")
             sources_label = " -> ".join(parts) if parts else "no API keys configured"
 
         print(f"Pricing {total} cards...")
@@ -168,10 +210,13 @@ def update_all_fmv(
                 if source in ("auto", "sportscardspro"):
                     result = _try_sportscardspro(card, settings)
 
+                if not result and source in ("auto", "cardladder"):
+                    result = _try_cardladder(card, settings)
+
                 if not result and source in ("auto", "cardhedge"):
                     result = _try_cardhedge(card, settings)
 
-                if not result and source in ("auto", "ebay"):
+                if not result and source == "ebay":
                     result = _try_ebay(card, settings)
 
                 if not result:

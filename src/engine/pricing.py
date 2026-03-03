@@ -2,8 +2,9 @@
 
 Pricing waterfall (best to worst):
   1. SportsCardsPro — real eBay sold prices by exact grade (best)
-  2. Card Hedge comps — time-weighted eBay sold prices (when key is approved)
-  3. eBay Browse API — active listing median, discounted 10% (last resort)
+  2. CardLadder — FMV + 30d/90d averages from recent sales
+  3. Card Hedge comps — time-weighted eBay sold prices (when key is approved)
+  4. eBay Browse API — active listing median, discounted 10% (last resort)
 """
 
 import statistics

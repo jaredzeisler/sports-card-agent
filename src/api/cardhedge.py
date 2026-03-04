@@ -181,6 +181,32 @@ class CardHedgeClient:
         except httpx.HTTPError:
             return []
 
+    @staticmethod
+    def _result_matches_card(result: dict, player: str, year: int | None,
+                             brand: str | None, set_name: str | None) -> bool:
+        """Verify a Card Hedge search result actually matches our card."""
+        desc = (result.get("description") or "").lower()
+        result_player = (result.get("player") or "").lower()
+        result_set = (result.get("set") or "").lower()
+        combined = f"{desc} {result_player} {result_set}"
+
+        # Player last name must appear
+        player_lower = player.lower()
+        last_name = player_lower.split()[-1] if player_lower else ""
+        if last_name and last_name not in combined:
+            return False
+
+        # If we have set_name or brand, check for it
+        if set_name:
+            set_words = [w for w in set_name.lower().split() if len(w) > 3]
+            if set_words and not any(w in combined for w in set_words):
+                return False
+        elif brand:
+            if brand.lower() not in combined:
+                return False
+
+        return True
+
     def get_fmv(
         self,
         player: str,
@@ -215,14 +241,21 @@ class CardHedgeClient:
         }
         category = category_map.get(sport)
 
-        # Search for the card
+        # Search for the card and pick the first result that actually matches
         search_result = self.search_card(query, category=category, page_size=5)
         cards = search_result.get("cards", [])
         if not cards:
             return None
 
-        # Use the first matching card
-        card = cards[0]
+        card = None
+        for candidate in cards:
+            if self._result_matches_card(candidate, player, year, brand, set_name):
+                card = candidate
+                break
+
+        if not card:
+            return None
+
         card_id = card.get("card_id")
         if not card_id:
             return None

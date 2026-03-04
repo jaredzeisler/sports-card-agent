@@ -93,6 +93,40 @@ class SportsCardsProClient:
         except httpx.HTTPError:
             return None
 
+    @staticmethod
+    def _product_matches_card(product: dict, player: str, year: int | None,
+                              brand: str | None, set_name: str | None) -> bool:
+        """Verify the returned product actually matches our card.
+
+        Checks that the product name contains the player name and at least
+        one of brand/set_name. This prevents a vague query like
+        "2019 LeBron James" from matching a $15 base card when we need
+        a National Treasures patch auto.
+        """
+        name = (product.get("product-name") or "").lower()
+        console = (product.get("console-name") or "").lower()
+        combined = f"{name} {console}"
+
+        # Player name must appear
+        player_lower = player.lower()
+        # Check last name at minimum (handles "LeBron James" vs "James, LeBron")
+        last_name = player_lower.split()[-1] if player_lower else ""
+        if last_name and last_name not in combined:
+            return False
+
+        # If we have a set_name or brand, at least one should appear
+        if set_name:
+            set_lower = set_name.lower()
+            # Check each meaningful word (skip short words like "of", "the")
+            set_words = [w for w in set_lower.split() if len(w) > 3]
+            if set_words and not any(w in combined for w in set_words):
+                return False
+        elif brand:
+            if brand.lower() not in combined:
+                return False
+
+        return True
+
     def get_fmv(
         self,
         player: str,
@@ -125,10 +159,26 @@ class SportsCardsProClient:
         query = " ".join(parts)
 
         product = self.get_product(query)
+
+        # Validate the match — reject if the product doesn't match our card
+        if product and not self._product_matches_card(product, player, year, brand, set_name):
+            product = None
+
         if not product:
-            # Retry broader
+            # Retry with brand + set if we have both (more specific than year+player)
+            if brand and set_name:
+                broader = f"{year or ''} {brand} {set_name} {player}".strip()
+                product = self.get_product(broader)
+                if product and not self._product_matches_card(product, player, year, brand, set_name):
+                    product = None
+
+        if not product:
+            # Last resort: year + player only — but still validate
             broader = f"{year or ''} {player}".strip()
             product = self.get_product(broader)
+            if product and not self._product_matches_card(product, player, year, brand, set_name):
+                product = None
+
         if not product:
             return None
 

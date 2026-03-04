@@ -7,6 +7,10 @@ Pricing waterfall:
 
 eBay active listings (Buy It Now) are only used if explicitly requested
 via source="ebay", never in the default "auto" waterfall.
+
+Sanity guard: if the returned FMV is <15% of purchase price AND the card
+cost >$100, the comp is almost certainly a mismatch (wrong card variant).
+These are flagged as "suspicious" and skipped — not written to DB.
 """
 
 import time
@@ -16,6 +20,30 @@ from src.models.database import get_session, init_db
 from src.models.card import Card
 from src.engine.pricing import get_ebay_market_price, calculate_fmv
 from config.settings import get_settings
+
+
+# --- Sanity guard thresholds ---
+# If FMV < this fraction of purchase price, treat as bad comp
+SUSPICIOUS_LOW_RATIO = 0.15
+# Only apply the guard to cards that cost more than this
+SUSPICIOUS_MIN_COST = 100.0
+# If FMV > this multiple of purchase price, also flag (wrong premium variant matched)
+SUSPICIOUS_HIGH_RATIO = 20.0
+
+
+def _is_suspicious_fmv(fmv: float, purchase_price: float) -> str | None:
+    """Check if FMV is suspiciously far from purchase price.
+
+    Returns a reason string if suspicious, None if OK.
+    """
+    if not purchase_price or purchase_price < SUSPICIOUS_MIN_COST:
+        return None
+    ratio = fmv / purchase_price
+    if ratio < SUSPICIOUS_LOW_RATIO:
+        return f"FMV ${fmv:.2f} is {ratio:.1%} of cost ${purchase_price:.2f} — likely wrong card"
+    if ratio > SUSPICIOUS_HIGH_RATIO:
+        return f"FMV ${fmv:.2f} is {ratio:.0f}x cost ${purchase_price:.2f} — likely wrong variant"
+    return None
 
 
 def _try_sportscardspro(card, settings) -> dict | None:
@@ -174,8 +202,10 @@ def update_all_fmv(
     updated = 0
     skipped = 0
     no_data = 0
+    suspicious = 0
     errors = []
     by_source = {}
+    suspicious_cards = []
 
     try:
         cards = session.query(Card).order_by(Card.id).all()
@@ -227,9 +257,18 @@ def update_all_fmv(
 
                 fmv = result["fmv"]
                 paid = card.purchase_price or 0
-                diff = fmv - paid
-                diff_pct = (diff / paid * 100) if paid > 0 else 0
-                arrow = "+" if diff >= 0 else ""
+
+                # Sanity guard: reject obvious mismatches
+                reason = _is_suspicious_fmv(fmv, paid)
+                if reason:
+                    print(f"SUSPICIOUS — {reason} [{result['source']}]")
+                    suspicious += 1
+                    suspicious_cards.append(
+                        f"  id={card.id} {card.player} {card.year} {card.brand} "
+                        f"{card.set_name} [{card.grade}] — {reason}"
+                    )
+                    time.sleep(delay)
+                    continue
 
                 src = result["source"]
                 by_source[src] = by_source.get(src, 0) + 1
@@ -250,9 +289,13 @@ def update_all_fmv(
             time.sleep(delay)
 
         print(f"\n{'='*60}")
-        print(f"Done: {updated} updated, {no_data} no data, {len(errors)} errors")
+        print(f"Done: {updated} updated, {no_data} no data, {suspicious} suspicious, {len(errors)} errors")
         if by_source:
             print(f"Sources: {by_source}")
+        if suspicious_cards:
+            print(f"\nSuspicious comps (skipped — need manual review):")
+            for line in suspicious_cards:
+                print(line)
 
     finally:
         session.close()
@@ -261,6 +304,8 @@ def update_all_fmv(
         "updated": updated,
         "skipped": skipped,
         "no_data": no_data,
+        "suspicious": suspicious,
+        "suspicious_cards": suspicious_cards,
         "errors": errors,
         "by_source": by_source,
     }

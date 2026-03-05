@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
 
+    # Fanatics Collect
+    fanatics_email: str = Field(default="", alias="FANATICS_EMAIL")
+    fanatics_password: str = Field(default="", alias="FANATICS_PASSWORD")
+
+    # Autobidder
+    autobid_hard_cap: float = Field(default=5000.0, alias="AUTOBID_HARD_CAP")
+    autobid_poll_interval: int = Field(default=60, alias="AUTOBID_POLL_INTERVAL")  # seconds
+
     # Agent limits
     auto_buy_limit: float = Field(default=50.0, alias="AGENT_AUTO_BUY_LIMIT")
     max_portfolio_value: float = Field(default=5000.0, alias="AGENT_MAX_PORTFOLIO_VALUE")

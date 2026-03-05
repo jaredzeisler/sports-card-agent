@@ -309,3 +309,42 @@ def update_all_fmv(
         "errors": errors,
         "by_source": by_source,
     }
+
+
+class _CardProxy:
+    """Lightweight stand-in for a Card ORM object, used by get_card_fmv."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def get_card_fmv(
+    player: str,
+    year: int | None = None,
+    brand: str | None = None,
+    set_name: str | None = None,
+    grade: float | None = None,
+    grading_company: str | None = None,
+    card_number: str | None = None,
+    variation: str | None = None,
+    sport: str = "basketball",
+) -> dict | None:
+    """Look up FMV for a card using the pricing waterfall (no DB required).
+
+    Returns dict with: fmv, confidence, source, detail -- or None if no data.
+    """
+    settings = get_settings()
+    card = _CardProxy(
+        player=player, year=year, brand=brand, set_name=set_name,
+        grade=grade, grading_company=grading_company,
+        card_number=card_number, variation=variation, sport=sport,
+        purchase_price=None, notes=None,
+    )
+
+    result = _try_sportscardspro(card, settings)
+    if not result:
+        result = _try_cardladder(card, settings)
+    if not result:
+        result = _try_cardhedge(card, settings)
+
+    return result

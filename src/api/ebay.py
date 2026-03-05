@@ -457,6 +457,131 @@ class EbayClient:
         resp.raise_for_status()
         return resp.json().get("orders", [])
 
+    # ── Auction Search & Bidding ───────────────────────────────────
+
+    def search_auctions(
+        self,
+        query: str,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Search for AUCTION listings on eBay via the Browse API."""
+        params = {"q": query, "limit": limit}
+
+        filters = ["buyingOptions:{AUCTION}"]
+        if min_price is not None:
+            filters.append(f"price:[{min_price}..],priceCurrency:USD")
+        if max_price is not None:
+            filters.append(f"price:[..{max_price}],priceCurrency:USD")
+        params["filter"] = ",".join(filters)
+
+        resp = httpx.get(
+            f"{self.base_url}/buy/browse/v1/item_summary/search",
+            headers=self._app_headers(),
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("itemSummaries", [])
+
+        results = []
+        for item in items:
+            price_info = item.get("currentBidPrice") or item.get("price", {})
+            results.append({
+                "item_id": item.get("itemId", ""),
+                "title": item.get("title", ""),
+                "current_price": float(price_info.get("value", 0)),
+                "bid_count": item.get("bidCount", 0),
+                "auction_url": item.get("itemWebUrl", ""),
+                "image_url": (item.get("image") or {}).get("imageUrl"),
+                "end_date": item.get("itemEndDate"),
+                "seller": (item.get("seller") or {}).get("username"),
+                "condition": item.get("condition"),
+            })
+        return results
+
+    def place_proxy_bid(self, item_id: str, max_amount: float) -> dict:
+        """Place a proxy bid on an eBay auction via the Offer API.
+
+        This is a Limited Release API — requires approval from eBay.
+        Falls back to a clear error if not approved.
+
+        Args:
+            item_id: eBay item ID (e.g. "v1|123456789|0")
+            max_amount: Maximum bid amount in USD
+
+        Returns dict with: success, message, current_price, high_bidder
+        """
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/buy/offer/v1_beta/bidding/{item_id}/place_proxy_bid",
+                headers=self._user_headers(),
+                json={
+                    "maxAmount": {
+                        "currency": "USD",
+                        "value": f"{max_amount:.2f}",
+                    }
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "success": True,
+                "message": "Proxy bid placed",
+                "current_price": float(
+                    data.get("currentPrice", {}).get("value", 0)
+                ),
+                "high_bidder": data.get("highBidder", False),
+                "proxy_bid_id": data.get("proxyBidId"),
+            }
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                return {
+                    "success": False,
+                    "message": (
+                        "eBay Offer API access denied — you need approval for "
+                        "the buy.offer.auction scope. Use browser-based bidding instead."
+                    ),
+                    "current_price": 0,
+                    "high_bidder": False,
+                }
+            try:
+                error_body = e.response.json()
+            except Exception:
+                error_body = {}
+            errors = error_body.get("errors", [{}])
+            msg = errors[0].get("message", str(e)) if errors else str(e)
+            return {
+                "success": False,
+                "message": f"Bid failed: {msg}",
+                "current_price": 0,
+                "high_bidder": False,
+            }
+
+    def get_bidding_status(self, item_id: str) -> dict | None:
+        """Check bidding status for an item we've bid on."""
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/buy/offer/v1_beta/bidding/{item_id}",
+                headers=self._user_headers(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "item_id": item_id,
+                "current_price": float(
+                    data.get("currentPrice", {}).get("value", 0)
+                ),
+                "high_bidder": data.get("highBidder", False),
+                "auction_status": data.get("auctionStatus"),  # ACTIVE, ENDED
+                "bid_count": data.get("bidCount", 0),
+            }
+        except httpx.HTTPStatusError:
+            return None
+
     # ── Order History (for import / buying) ─────────────────────────
 
     def get_orders(self, days: int = 365, limit: int = 200) -> list[dict]:

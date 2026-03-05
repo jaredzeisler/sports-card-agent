@@ -1167,5 +1167,259 @@ def ebay_sync_sold(days):
         session.close()
 
 
+# ── Autobidder ──────────────────────────────────────────────────────
+
+@cli.group()
+def autobid():
+    """Autobidder — monitor auctions and place FMV-capped bids."""
+    pass
+
+
+@autobid.command("run")
+@click.option("--live", is_flag=True, default=False, help="Place real bids (default: dry run)")
+@click.option("--once", is_flag=True, default=False, help="Run one pass then exit")
+@click.option("--interval", type=int, default=None, help="Seconds between passes")
+@click.option("--show-browser", is_flag=True, default=False, help="Show browser (not headless)")
+def autobid_run(live, once, interval, show_browser):
+    """Run the autobidder (dry-run by default)."""
+    from src.agent.autobidder import Autobidder
+
+    dry_run = not live
+    if dry_run:
+        console.print("[yellow]DRY RUN mode — no real bids will be placed[/]")
+    else:
+        console.print("[red bold]LIVE MODE — real bids will be placed![/]")
+
+    bidder = Autobidder(headless=not show_browser)
+    if once:
+        stats = bidder.run_once(dry_run=dry_run)
+        console.print(f"\n[green]Done:[/] {stats['auctions_found']} auctions, "
+                      f"{stats['bids_placed']} bids, {stats['bids_skipped']} skipped")
+        if stats["errors"]:
+            for err in stats["errors"]:
+                console.print(f"  [red]Error:[/] {err}")
+    else:
+        bidder.run_continuous(dry_run=dry_run, interval=interval)
+
+
+@autobid.command("add-search")
+@click.argument("query")
+@click.option("--platform", type=click.Choice(["fanatics", "ebay"]), default="fanatics")
+@click.option("--player", default=None, help="Player name (for FMV lookup & tier)")
+@click.option("--year", type=int, default=None)
+@click.option("--brand", default=None)
+@click.option("--set-name", default=None)
+@click.option("--min-grade", type=float, default=None)
+@click.option("--sport", default="basketball")
+@click.option("--hard-cap", type=float, default=None, help="Never bid above this amount")
+@click.option("--override-pct", type=float, default=None, help="Override FMV% (0.0-1.0)")
+def autobid_add_search(query, platform, player, year, brand, set_name, min_grade, sport, hard_cap, override_pct):
+    """Add a search for the autobidder to monitor."""
+    from src.models.bid import BidSearchCriteria
+
+    session = get_session()
+    try:
+        crit = BidSearchCriteria(
+            platform=platform,
+            query=query,
+            player=player,
+            year=year,
+            brand=brand,
+            set_name=set_name,
+            min_grade=min_grade,
+            sport=sport,
+            hard_cap=hard_cap,
+            override_fmv_pct=override_pct,
+        )
+        session.add(crit)
+        session.commit()
+
+        from src.engine.bid_engine import is_tier1_player
+
+        tier = "tier1 (80%)" if player and is_tier1_player(player) else "tier2 (60%)"
+        if override_pct:
+            tier = f"override ({override_pct:.0%})"
+
+        console.print(f"[green]Search added:[/] [{platform}] '{query}'")
+        if player:
+            console.print(f"  Player: {player} — {tier}")
+        if hard_cap:
+            console.print(f"  Hard cap: ${hard_cap:,.2f}")
+    finally:
+        session.close()
+
+
+@autobid.command("searches")
+def autobid_list_searches():
+    """List all saved autobidder searches."""
+    from src.models.bid import BidSearchCriteria
+
+    session = get_session()
+    try:
+        criteria = session.query(BidSearchCriteria).all()
+        if not criteria:
+            console.print("[yellow]No searches configured. Use 'autobid add-search' to add one.[/]")
+            return
+
+        table = Table(title=f"Autobidder Searches ({len(criteria)})")
+        table.add_column("ID", style="dim")
+        table.add_column("Platform")
+        table.add_column("Query", style="cyan")
+        table.add_column("Player")
+        table.add_column("Cap", justify="right")
+        table.add_column("Enabled")
+        table.add_column("Last Run")
+
+        for c in criteria:
+            table.add_row(
+                str(c.id),
+                c.platform,
+                c.query,
+                c.player or "-",
+                f"${c.hard_cap:,.0f}" if c.hard_cap else "-",
+                "[green]yes[/]" if c.enabled else "[red]no[/]",
+                c.last_run_at.strftime("%m/%d %H:%M") if c.last_run_at else "-",
+            )
+        console.print(table)
+    finally:
+        session.close()
+
+
+@autobid.command("toggle")
+@click.argument("search_id", type=int)
+def autobid_toggle(search_id):
+    """Enable/disable a saved search."""
+    from src.models.bid import BidSearchCriteria
+
+    session = get_session()
+    try:
+        crit = session.get(BidSearchCriteria, search_id)
+        if not crit:
+            console.print(f"[red]Search {search_id} not found[/]")
+            return
+        crit.enabled = not crit.enabled
+        session.commit()
+        state = "[green]enabled[/]" if crit.enabled else "[red]disabled[/]"
+        console.print(f"Search {search_id} ({crit.query}) — {state}")
+    finally:
+        session.close()
+
+
+@autobid.command("remove")
+@click.argument("search_id", type=int)
+def autobid_remove(search_id):
+    """Remove a saved search."""
+    from src.models.bid import BidSearchCriteria
+
+    session = get_session()
+    try:
+        crit = session.get(BidSearchCriteria, search_id)
+        if not crit:
+            console.print(f"[red]Search {search_id} not found[/]")
+            return
+        session.delete(crit)
+        session.commit()
+        console.print(f"[green]Removed search {search_id}:[/] {crit.query}")
+    finally:
+        session.close()
+
+
+@autobid.command("bids")
+@click.option("--status", "bid_status", type=click.Choice(["all", "active", "won", "lost"]), default="active")
+def autobid_bids(bid_status):
+    """View bid history and status."""
+    from src.models.bid import AuctionBid, BidStatus
+
+    session = get_session()
+    try:
+        q = session.query(AuctionBid)
+        if bid_status == "active":
+            q = q.filter(AuctionBid.status.in_([
+                BidStatus.WATCHING, BidStatus.BID_PLACED,
+                BidStatus.WINNING, BidStatus.OUTBID,
+            ]))
+        elif bid_status == "won":
+            q = q.filter(AuctionBid.status == BidStatus.WON)
+        elif bid_status == "lost":
+            q = q.filter(AuctionBid.status == BidStatus.LOST)
+
+        bids = q.order_by(AuctionBid.updated_at.desc()).limit(50).all()
+        if not bids:
+            console.print("[yellow]No bids found.[/]")
+            return
+
+        table = Table(title=f"Auction Bids ({len(bids)})")
+        table.add_column("Platform")
+        table.add_column("Title", max_width=40)
+        table.add_column("Tier")
+        table.add_column("FMV", justify="right")
+        table.add_column("Max Bid", justify="right")
+        table.add_column("Current", justify="right")
+        table.add_column("Status", style="bold")
+
+        for b in bids:
+            status_color = {
+                "watching": "yellow",
+                "bid_placed": "cyan",
+                "winning": "green",
+                "outbid": "red",
+                "won": "green bold",
+                "lost": "red",
+                "skipped": "dim",
+            }.get(b.status.value, "white")
+
+            table.add_row(
+                b.platform,
+                b.title[:40] if b.title else "-",
+                b.tier or "-",
+                f"${b.fmv:,.2f}" if b.fmv else "-",
+                f"${b.max_hammer_bid:,.2f}" if b.max_hammer_bid else "-",
+                f"${b.current_price:,.2f}" if b.current_price else "-",
+                f"[{status_color}]{b.status.value}[/]",
+            )
+        console.print(table)
+    finally:
+        session.close()
+
+
+@autobid.command("check")
+def autobid_check():
+    """Check and update status of all active bids."""
+    from src.agent.autobidder import Autobidder
+
+    bidder = Autobidder()
+    results = bidder.check_bid_status()
+    if not results:
+        console.print("[yellow]No active bids to check.[/]")
+        return
+
+    for r in results:
+        status_color = "green" if r["status"] == "winning" else "red" if r["status"] in ("outbid", "lost") else "cyan"
+        console.print(
+            f"  [{status_color}]{r['status']:12s}[/] {r['title'][:40]:40s} "
+            f"current=${r['current_price']:,.2f}  max=${r['our_max_bid']:,.2f}  fmv=${r['fmv']:,.2f}"
+        )
+
+
+@autobid.command("calc")
+@click.argument("player")
+@click.argument("fmv", type=float)
+@click.option("--platform", type=click.Choice(["fanatics", "ebay"]), default="fanatics")
+def autobid_calc(player, fmv, platform):
+    """Quick calculator: show max bid for a player at a given FMV."""
+    from src.engine.bid_engine import calculate_max_bid, is_tier1_player
+
+    calc = calculate_max_bid(fmv, player, platform)
+    tier_label = "[green]TOP 25[/]" if is_tier1_player(player) else "[yellow]TIER 2[/]"
+
+    console.print(f"\n  Player:      {player} — {tier_label}")
+    console.print(f"  Platform:    {platform}")
+    console.print(f"  FMV:         ${fmv:,.2f}")
+    console.print(f"  FMV ceiling: {calc['fmv_pct']:.0%}")
+    console.print(f"  Premium:     {calc['buyers_premium_rate']:.0%}")
+    console.print(f"  Max all-in:  ${calc['max_all_in']:,.2f}")
+    console.print(f"  [bold]Max bid:     ${calc['max_hammer']:,.2f}[/]")
+
+
 if __name__ == "__main__":
     cli()

@@ -5,13 +5,17 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # eBay
+    # eBay API
     ebay_app_id: str = Field(default="", alias="EBAY_APP_ID")
     ebay_cert_id: str = Field(default="", alias="EBAY_CERT_ID")
     ebay_dev_id: str = Field(default="", alias="EBAY_DEV_ID")
     ebay_redirect_uri: str = Field(default="", alias="EBAY_REDIRECT_URI")
     ebay_user_token: str = Field(default="", alias="EBAY_USER_TOKEN")
     ebay_sandbox: bool = Field(default=True, alias="EBAY_SANDBOX")
+
+    # eBay Login (used for eBay bidding + Goldin SSO)
+    ebay_login_email: str = Field(default="", alias="EBAY_LOGIN_EMAIL")
+    ebay_login_password: str = Field(default="", alias="EBAY_LOGIN_PASSWORD")
 
     # CardLadder
     cardladder_api_key: str = Field(default="", alias="CARDLADDER_API_KEY")
@@ -31,6 +35,10 @@ class Settings(BaseSettings):
     # Fanatics Collect
     fanatics_email: str = Field(default="", alias="FANATICS_EMAIL")
     fanatics_password: str = Field(default="", alias="FANATICS_PASSWORD")
+
+    # Goldin
+    goldin_email: str = Field(default="", alias="GOLDIN_EMAIL")
+    goldin_password: str = Field(default="", alias="GOLDIN_PASSWORD")
 
     # Autobidder
     autobid_hard_cap: float = Field(default=5000.0, alias="AUTOBID_HARD_CAP")

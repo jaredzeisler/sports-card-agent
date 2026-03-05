@@ -26,7 +26,7 @@ class AuctionBid(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Platform info
-    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # "fanatics", "ebay"
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # "fanatics", "goldin", "ebay"
     auction_id: Mapped[str] = mapped_column(String(200), nullable=False)  # Platform's auction/item ID
     auction_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
@@ -90,7 +90,7 @@ class BidSearchCriteria(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # What to search for
-    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # "fanatics", "ebay"
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # "fanatics", "goldin", "ebay"
     query: Mapped[str] = mapped_column(String(500), nullable=False)
     player: Mapped[str | None] = mapped_column(String(200), nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)

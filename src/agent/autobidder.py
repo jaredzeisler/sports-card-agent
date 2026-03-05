@@ -30,13 +30,34 @@ class Autobidder:
         self.settings = settings or get_settings()
         self.headless = headless
         self._fanatics = None
+        self._goldin = None
         self._ebay = None
 
     def _get_fanatics(self):
         if not self._fanatics:
+            if not self.settings.fanatics_email or not self.settings.fanatics_password:
+                raise RuntimeError(
+                    "Fanatics credentials not configured. "
+                    "Set FANATICS_EMAIL and FANATICS_PASSWORD in your .env file."
+                )
             from src.api.fanatics import FanaticsClient
             self._fanatics = FanaticsClient(self.settings, headless=self.headless)
         return self._fanatics
+
+    def _get_goldin(self):
+        if not self._goldin:
+            has_goldin = self.settings.goldin_email and self.settings.goldin_password
+            has_ebay_login = self.settings.ebay_login_email and self.settings.ebay_login_password
+            if not has_goldin and not has_ebay_login:
+                raise RuntimeError(
+                    "Goldin credentials not configured. "
+                    "Set EBAY_LOGIN_EMAIL and EBAY_LOGIN_PASSWORD in .env "
+                    "(Goldin supports Sign in with eBay), or set "
+                    "GOLDIN_EMAIL and GOLDIN_PASSWORD for a direct account."
+                )
+            from src.api.goldin import GoldinClient
+            self._goldin = GoldinClient(self.settings, headless=self.headless)
+        return self._goldin
 
     def _get_ebay(self):
         if not self._ebay:
@@ -101,10 +122,12 @@ class Autobidder:
 
         finally:
             session.close()
-            # Close Fanatics browser if it was used
+            # Close browsers if they were used
+            import asyncio
             if self._fanatics:
-                import asyncio
                 asyncio.run(self._fanatics.close())
+            if self._goldin:
+                asyncio.run(self._goldin.close())
 
         return stats
 
@@ -114,6 +137,8 @@ class Autobidder:
 
         if crit.platform == "fanatics":
             auctions = self._search_fanatics(crit)
+        elif crit.platform == "goldin":
+            auctions = self._search_goldin(crit)
         elif crit.platform == "ebay":
             auctions = self._search_ebay(crit)
         else:
@@ -135,6 +160,19 @@ class Autobidder:
             logged_in = await client.login()
             if not logged_in:
                 raise RuntimeError("Failed to log in to Fanatics Collect")
+            return await client.search_auctions(crit.query)
+
+        return asyncio.run(_search())
+
+    def _search_goldin(self, crit: BidSearchCriteria) -> list[dict]:
+        """Search Goldin for matching auctions."""
+        import asyncio
+        client = self._get_goldin()
+
+        async def _search():
+            logged_in = await client.login()
+            if not logged_in:
+                raise RuntimeError("Failed to log in to Goldin")
             return await client.search_auctions(crit.query)
 
         return asyncio.run(_search())
@@ -302,9 +340,9 @@ class Autobidder:
 
     def _place_bid(self, platform: str, auction: dict, max_bid: float) -> dict:
         """Place a bid on the appropriate platform."""
-        if platform == "fanatics":
+        if platform in ("fanatics", "goldin"):
             import asyncio
-            client = self._get_fanatics()
+            client = self._get_fanatics() if platform == "fanatics" else self._get_goldin()
             return asyncio.run(
                 client.place_bid(auction["auction_url"], max_bid)
             )

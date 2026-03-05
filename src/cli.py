@@ -1204,7 +1204,7 @@ def autobid_run(live, once, interval, show_browser):
 
 @autobid.command("add-search")
 @click.argument("query")
-@click.option("--platform", type=click.Choice(["fanatics", "ebay"]), default="fanatics")
+@click.option("--platform", type=click.Choice(["fanatics", "goldin", "ebay"]), default="fanatics")
 @click.option("--player", default=None, help="Player name (for FMV lookup & tier)")
 @click.option("--year", type=int, default=None)
 @click.option("--brand", default=None)
@@ -1404,7 +1404,7 @@ def autobid_check():
 @autobid.command("calc")
 @click.argument("player")
 @click.argument("fmv", type=float)
-@click.option("--platform", type=click.Choice(["fanatics", "ebay"]), default="fanatics")
+@click.option("--platform", type=click.Choice(["fanatics", "goldin", "ebay"]), default="fanatics")
 def autobid_calc(player, fmv, platform):
     """Quick calculator: show max bid for a player at a given FMV."""
     from src.engine.bid_engine import calculate_max_bid, is_tier1_player

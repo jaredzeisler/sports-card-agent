@@ -1,5 +1,5 @@
-"""Scan target cards: base-only, ending within 12h, with deal scoring vs FMV."""
-import httpx, base64, time, sys
+"""Scan target cards: base-only, ending within 12h, % below FMV."""
+import httpx, base64, time, sys, re
 from datetime import datetime, timezone, timedelta
 from config.settings import get_settings
 from src.api.sportscardspro import SportsCardsProClient
@@ -45,25 +45,63 @@ WRONG_SET = {
     "Chrome": ["bowman", "stadium club", "heritage"],
 }
 
+# Junk listings to filter out
+JUNK_KEYWORDS = [
+    "mystery", "repack", "break", "pack", "box", "lot of",
+    "digital", "read desc", "read description",
+]
 
-def classify(title, expected_set):
+# Non-PSA grading companies to exclude
+NON_PSA_GRADERS = [
+    "bgs", "bgc", "cgc", "sgc", "wcg", "hga", "ags", "csg", "gma", "mga",
+]
+
+
+def classify(title, expected_set, player_last_name, card_num):
+    """Classify a listing. Returns (label, reason) where label is BASE or a rejection reason."""
     t = f" {title.lower()} "
+
+    # Must contain player's last name
+    if player_last_name.lower() not in t:
+        return f"WRONG PLAYER (no '{player_last_name}')"
+
+    # Must contain expected set name
     if expected_set.lower() not in t:
         return "WRONG SET"
+
+    # Check wrong-set keywords
     for ws in WRONG_SET.get(expected_set, []):
         if ws in t:
             return f"WRONG SET ({ws})"
+
+    # Must contain the correct card number
+    # Match #280, #16, etc. — strip the # for matching
+    num = card_num.lstrip("#")
+    # Look for #280 or # 280 patterns in title
+    if not re.search(rf"#\s*{re.escape(num)}\b", t):
+        return f"WRONG CARD (no {card_num})"
+
+    # Filter junk listings
+    for junk in JUNK_KEYWORDS:
+        if junk in t:
+            return f"JUNK ({junk})"
+
+    # Filter non-PSA graders
+    for grader in NON_PSA_GRADERS:
+        if f" {grader} " in t or f" {grader}/" in t:
+            return f"WRONG GRADER ({grader})"
+
+    # Check for parallels/variations
     found = [v.strip() for v in VARIATIONS if v in t]
     if found:
         return f"PARALLEL ({', '.join(found)})"
+
     return "BASE"
 
 
 def parse_end_time(iso_str):
-    """Parse eBay ISO timestamp to UTC datetime."""
     if not iso_str:
         return None
-    # Handle both Z and +00:00 formats
     iso_str = iso_str.replace("Z", "+00:00")
     try:
         return datetime.fromisoformat(iso_str)
@@ -72,7 +110,6 @@ def parse_end_time(iso_str):
 
 
 def hours_left(end_dt):
-    """Hours remaining until auction ends."""
     if not end_dt:
         return 999
     now = datetime.now(timezone.utc)
@@ -80,20 +117,20 @@ def hours_left(end_dt):
     return delta.total_seconds() / 3600
 
 
-def discount_pct(current_price, fmv):
-    """% below FMV. Positive = deal, negative = overpriced."""
+def pct_below_fmv(current_price, fmv):
+    """% below FMV. Positive = below FMV, negative = above FMV."""
     if not fmv or fmv == 0:
         return 0
     return ((fmv - current_price) / fmv) * 100
 
 
 TARGETS = [
-    ("PSA 10 Luka Doncic Prizm rookie", "Prizm", "Luka Doncic", 10, "#280"),
-    ("PSA 10 Jayson Tatum Prizm rookie", "Prizm", "Jayson Tatum", 10, "#16"),
-    ("PSA 10 Anthony Edwards Prizm rookie", "Prizm", "Anthony Edwards", 10, "#258"),
-    ("PSA 10 Victor Wembanyama Prizm rookie", "Prizm", "Victor Wembanyama", 10, "#136"),
-    ("PSA 10 Ja Morant Prizm rookie", "Prizm", "Ja Morant", 10, "#249"),
-    ("PSA 9 LeBron James Topps Chrome rookie", "Chrome", "LeBron James", 9, "#111"),
+    ("PSA 10 Luka Doncic Prizm rookie #280", "Prizm", "Luka Doncic", "Doncic", 10, "#280"),
+    ("PSA 10 Jayson Tatum Prizm rookie #16", "Prizm", "Jayson Tatum", "Tatum", 10, "#16"),
+    ("PSA 10 Anthony Edwards Prizm rookie #258", "Prizm", "Anthony Edwards", "Edwards", 10, "#258"),
+    ("PSA 10 Victor Wembanyama Prizm rookie #136", "Prizm", "Victor Wembanyama", "Wembanyama", 10, "#136"),
+    ("PSA 10 Ja Morant Prizm rookie #249", "Prizm", "Ja Morant", "Morant", 10, "#249"),
+    ("PSA 9 LeBron James Topps Chrome rookie #111", "Chrome", "LeBron James", "LeBron", 9, "#111"),
 ]
 
 now = datetime.now(timezone.utc)
@@ -101,11 +138,11 @@ cutoff = now + timedelta(hours=MAX_HOURS)
 print(f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M')}")
 print(f"Auction cutoff:     {cutoff.strftime('%Y-%m-%d %H:%M')} ({MAX_HOURS}h window)")
 
-all_deals = []  # collect best deals across all targets
+all_below_fmv = []  # collect listings below FMV across all targets
 
-for query, expected_set, player, grade, card_num in TARGETS:
+for query, expected_set, player, last_name, grade, card_num in TARGETS:
     print(f"\n{'='*95}")
-    print(f"TARGET: {query} {card_num}")
+    print(f"TARGET: {player} — {expected_set} {card_num} PSA {grade}")
     print(f"{'='*95}")
 
     # FMV
@@ -115,15 +152,15 @@ for query, expected_set, player, grade, card_num in TARGETS:
         fmv_data = scp.get_fmv(player=player, set_name=set_q, grade=grade)
         if fmv_data:
             fmv = fmv_data["fmv"]
-            print(f"  BASE FMV: ${fmv:,.2f}  (vol: {fmv_data.get('sales_volume', 0)})")
+            print(f"  FMV: ${fmv:,.2f}  (vol: {fmv_data.get('sales_volume', 0)})")
         else:
-            print(f"  BASE FMV: Unknown")
+            print(f"  FMV: Unknown")
     except Exception as e:
         print(f"  FMV Error: {e}")
     time.sleep(1.1)
 
     # --- AUCTIONS ending within 12h ---
-    print(f"\n  AUCTIONS (ending within {MAX_HOURS}h, base cards only):")
+    print(f"\n  AUCTIONS (ending within {MAX_HOURS}h):")
     try:
         r = httpx.get(
             f"{s.ebay_base_url}/buy/browse/v1/item_summary/search",
@@ -140,20 +177,19 @@ for query, expected_set, player, grade, card_num in TARGETS:
         auctions = r.json().get("itemSummaries", [])
 
         base_soon = []
-        base_later = 0
-        non_base = 0
+        filtered = {"later": 0}
         for a in auctions:
             title = a.get("title", "")
-            label = classify(title, expected_set)
+            label = classify(title, expected_set, last_name, card_num)
             if label != "BASE":
-                non_base += 1
+                filtered[label] = filtered.get(label, 0) + 1
                 continue
 
             end_dt = parse_end_time(a.get("itemEndDate"))
             h_left = hours_left(end_dt)
 
             if h_left > MAX_HOURS:
-                base_later += 1
+                filtered["later"] += 1
                 continue
 
             bp = a.get("currentBidPrice") or a.get("price", {})
@@ -161,33 +197,31 @@ for query, expected_set, player, grade, card_num in TARGETS:
             bids = a.get("bidCount", 0)
             end_str = end_dt.strftime("%m/%d %H:%M") if end_dt else "?"
 
-            disc = discount_pct(price, fmv) if fmv else 0
-            base_soon.append((price, bids, h_left, end_str, title, disc))
+            pct = pct_below_fmv(price, fmv) if fmv else 0
+            base_soon.append((price, bids, h_left, end_str, title, pct))
 
         if base_soon:
-            base_soon.sort(key=lambda x: x[0])  # cheapest first
-            for p, b, h, e, t, d in base_soon:
-                flag = ""
-                if d >= 50:
-                    flag = " *** SNIPE CANDIDATE"
-                elif d >= 25:
-                    flag = " ** POTENTIAL DEAL"
-                elif d >= 10:
-                    flag = " * WATCH"
-                print(f"    ${p:>8.2f}  bids={b:<3} ends={e} ({h:.1f}h)  {d:+.0f}% vs FMV{flag}")
+            base_soon.sort(key=lambda x: x[0])
+            for p, b, h, e, t, pct in base_soon:
+                print(f"    ${p:>8.2f}  bids={b:<3} ends={e} ({h:.1f}h)  {pct:+.0f}% vs FMV")
                 print(f"      {t[:75]}")
-                if fmv and d >= 10:
-                    all_deals.append((player, "AUCTION", p, fmv, d, h, b, e, t))
+                all_below_fmv.append((player, "AUCTION", p, fmv, pct, h, b, e, t))
         else:
-            print(f"    No base auctions ending within {MAX_HOURS}h")
+            print(f"    None")
 
-        print(f"    [{non_base} parallels/wrong-set filtered, {base_later} base ending later]")
+        # Show filter summary
+        filter_parts = []
+        for reason, count in sorted(filtered.items()):
+            if count > 0:
+                filter_parts.append(f"{count} {reason}")
+        if filter_parts:
+            print(f"    [filtered: {', '.join(filter_parts)}]")
 
     except Exception as e:
         print(f"    Error: {e}")
 
-    # --- BIN below FMV ---
-    print(f"\n  BUY IT NOW (base cards, sorted by price):")
+    # --- BIN ---
+    print(f"\n  BUY IT NOW:")
     try:
         r2 = httpx.get(
             f"{s.ebay_base_url}/buy/browse/v1/item_summary/search",
@@ -205,7 +239,7 @@ for query, expected_set, player, grade, card_num in TARGETS:
         base_bins = []
         for b in bins:
             title = b.get("title", "")
-            label = classify(title, expected_set)
+            label = classify(title, expected_set, last_name, card_num)
             if label != "BASE":
                 continue
             price = float(b.get("price", {}).get("value", 0))
@@ -214,36 +248,31 @@ for query, expected_set, player, grade, card_num in TARGETS:
         if base_bins:
             base_bins.sort(key=lambda x: x[0])
             for p, t in base_bins[:5]:
-                disc = discount_pct(p, fmv) if fmv else 0
-                flag = ""
-                if disc >= 20:
-                    flag = " ** BIN DEAL"
-                elif disc >= 10:
-                    flag = " * BELOW FMV"
-                print(f"    ${p:>8.2f}  {disc:+.0f}% vs FMV{flag}")
+                pct = pct_below_fmv(p, fmv) if fmv else 0
+                print(f"    ${p:>8.2f}  {pct:+.0f}% vs FMV")
                 print(f"      {t[:75]}")
-                if fmv and disc >= 10:
-                    all_deals.append((player, "BIN", p, fmv, disc, 0, 0, "now", t))
+                all_below_fmv.append((player, "BIN", p, fmv, pct, 0, 0, "now", t))
         else:
-            print(f"    No base card BINs found")
+            print(f"    None matching {card_num}")
 
     except Exception as e:
         print(f"    Error: {e}")
 
-# --- DEAL SUMMARY ---
+# --- SUMMARY ---
 print(f"\n{'='*95}")
-print(f"DEAL SUMMARY (all cards >10% below FMV)")
+print(f"SUMMARY — All matched listings vs FMV")
 print(f"{'='*95}")
-if all_deals:
-    all_deals.sort(key=lambda x: -x[4])  # best discount first
-    for player, typ, price, fmv_val, disc, h, bids, end, title in all_deals:
+if all_below_fmv:
+    all_below_fmv.sort(key=lambda x: -x[4])  # highest % below FMV first
+    for player, typ, price, fmv_val, pct, h, bids, end, title in all_below_fmv:
+        fmv_str = f"FMV ${fmv_val:,.0f}" if fmv_val else "FMV ?"
         if typ == "AUCTION":
-            print(f"  {disc:+.0f}%  ${price:>8.2f} (FMV ${fmv_val:,.0f})  {player}  AUCTION  bids={bids} ends={end} ({h:.1f}h)")
+            print(f"  {pct:+.0f}%  ${price:>8.2f} ({fmv_str})  {player}  AUCTION  bids={bids} ends={end} ({h:.1f}h)")
         else:
-            print(f"  {disc:+.0f}%  ${price:>8.2f} (FMV ${fmv_val:,.0f})  {player}  BIN NOW")
+            print(f"  {pct:+.0f}%  ${price:>8.2f} ({fmv_str})  {player}  BIN")
         print(f"         {title[:70]}")
 else:
-    print("  No deals found >10% below FMV")
+    print("  No matched listings found")
 
 print(f"\n{'='*95}")
 print("DONE")

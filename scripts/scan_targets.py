@@ -1,12 +1,13 @@
-"""Scan all target cards, classify base vs parallel, show FMV + live auctions + BIN."""
+"""Scan target cards: base-only, ending within 12h, with deal scoring vs FMV."""
 import httpx, base64, time, sys
+from datetime import datetime, timezone, timedelta
 from config.settings import get_settings
 from src.api.sportscardspro import SportsCardsProClient
 
 s = get_settings()
 scp = SportsCardsProClient(s)
 
-# Get eBay token
+# eBay auth
 creds = base64.b64encode(f"{s.ebay_app_id}:{s.ebay_cert_id}".encode()).decode()
 resp = httpx.post(
     s.ebay_auth_url,
@@ -23,6 +24,8 @@ hdrs = {
     "Content-Type": "application/json",
     "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
 }
+
+MAX_HOURS = 12  # only show auctions ending within this window
 
 VARIATIONS = [
     "silver", "gold", " red ", "blue", "green", "orange", "purple", "pink",
@@ -56,6 +59,34 @@ def classify(title, expected_set):
     return "BASE"
 
 
+def parse_end_time(iso_str):
+    """Parse eBay ISO timestamp to UTC datetime."""
+    if not iso_str:
+        return None
+    # Handle both Z and +00:00 formats
+    iso_str = iso_str.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(iso_str)
+    except ValueError:
+        return None
+
+
+def hours_left(end_dt):
+    """Hours remaining until auction ends."""
+    if not end_dt:
+        return 999
+    now = datetime.now(timezone.utc)
+    delta = end_dt - now
+    return delta.total_seconds() / 3600
+
+
+def discount_pct(current_price, fmv):
+    """% below FMV. Positive = deal, negative = overpriced."""
+    if not fmv or fmv == 0:
+        return 0
+    return ((fmv - current_price) / fmv) * 100
+
+
 TARGETS = [
     ("PSA 10 Luka Doncic Prizm rookie", "Prizm", "Luka Doncic", 10, "#280"),
     ("PSA 10 Jayson Tatum Prizm rookie", "Prizm", "Jayson Tatum", 10, "#16"),
@@ -65,102 +96,154 @@ TARGETS = [
     ("PSA 9 LeBron James Topps Chrome rookie", "Chrome", "LeBron James", 9, "#111"),
 ]
 
+now = datetime.now(timezone.utc)
+cutoff = now + timedelta(hours=MAX_HOURS)
+print(f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M')}")
+print(f"Auction cutoff:     {cutoff.strftime('%Y-%m-%d %H:%M')} ({MAX_HOURS}h window)")
+
+all_deals = []  # collect best deals across all targets
+
 for query, expected_set, player, grade, card_num in TARGETS:
     print(f"\n{'='*95}")
     print(f"TARGET: {query} {card_num}")
     print(f"{'='*95}")
 
     # FMV
+    fmv = None
     try:
         set_q = "Topps Chrome" if expected_set == "Chrome" else expected_set
         fmv_data = scp.get_fmv(player=player, set_name=set_q, grade=grade)
         if fmv_data:
-            print(f"  BASE FMV: ${fmv_data['fmv']:,.2f}  (product: {fmv_data.get('product_name','')}, vol: {fmv_data.get('sales_volume',0)})")
+            fmv = fmv_data["fmv"]
+            print(f"  BASE FMV: ${fmv:,.2f}  (vol: {fmv_data.get('sales_volume', 0)})")
         else:
             print(f"  BASE FMV: Unknown")
     except Exception as e:
         print(f"  FMV Error: {e}")
     time.sleep(1.1)
 
-    # Auctions
-    print(f"\n  AUCTIONS:")
+    # --- AUCTIONS ending within 12h ---
+    print(f"\n  AUCTIONS (ending within {MAX_HOURS}h, base cards only):")
     try:
         r = httpx.get(
             f"{s.ebay_base_url}/buy/browse/v1/item_summary/search",
             headers=hdrs,
-            params={"q": query, "limit": 25, "filter": "buyingOptions:{AUCTION}"},
+            params={
+                "q": query,
+                "limit": 50,
+                "filter": "buyingOptions:{AUCTION}",
+                "sort": "endingSoonest",
+            },
             timeout=30,
         )
         r.raise_for_status()
         auctions = r.json().get("itemSummaries", [])
-        base_a = []
-        other_a = []
+
+        base_soon = []
+        base_later = 0
+        non_base = 0
         for a in auctions:
+            title = a.get("title", "")
+            label = classify(title, expected_set)
+            if label != "BASE":
+                non_base += 1
+                continue
+
+            end_dt = parse_end_time(a.get("itemEndDate"))
+            h_left = hours_left(end_dt)
+
+            if h_left > MAX_HOURS:
+                base_later += 1
+                continue
+
             bp = a.get("currentBidPrice") or a.get("price", {})
             price = float(bp.get("value", 0))
             bids = a.get("bidCount", 0)
-            end = (a.get("itemEndDate") or "?")[:19].replace("T", " ")
-            title = a.get("title", "")
-            label = classify(title, expected_set)
-            row = (price, bids, end, title, label)
-            if label == "BASE":
-                base_a.append(row)
-            else:
-                other_a.append(row)
+            end_str = end_dt.strftime("%m/%d %H:%M") if end_dt else "?"
 
-        if base_a:
-            print(f"    BASE CARD auctions ({len(base_a)}):")
-            for p, b, e, t, l in base_a:
-                print(f"      ${p:>8.2f}  bids={b:<3} ends={e}  {t[:65]}")
+            disc = discount_pct(price, fmv) if fmv else 0
+            base_soon.append((price, bids, h_left, end_str, title, disc))
+
+        if base_soon:
+            base_soon.sort(key=lambda x: x[0])  # cheapest first
+            for p, b, h, e, t, d in base_soon:
+                flag = ""
+                if d >= 50:
+                    flag = " *** SNIPE CANDIDATE"
+                elif d >= 25:
+                    flag = " ** POTENTIAL DEAL"
+                elif d >= 10:
+                    flag = " * WATCH"
+                print(f"    ${p:>8.2f}  bids={b:<3} ends={e} ({h:.1f}h)  {d:+.0f}% vs FMV{flag}")
+                print(f"      {t[:75]}")
+                if fmv and d >= 10:
+                    all_deals.append((player, "AUCTION", p, fmv, d, h, b, e, t))
         else:
-            print(f"    BASE CARD auctions: NONE")
+            print(f"    No base auctions ending within {MAX_HOURS}h")
 
-        if other_a:
-            print(f"    Parallels/Other ({len(other_a)}):")
-            for p, b, e, t, l in other_a:
-                print(f"      ${p:>8.2f}  bids={b:<3} ends={e}  [{l}]")
-                print(f"        {t[:75]}")
+        print(f"    [{non_base} parallels/wrong-set filtered, {base_later} base ending later]")
+
     except Exception as e:
         print(f"    Error: {e}")
 
-    # BIN
-    print(f"\n  BUY IT NOW:")
+    # --- BIN below FMV ---
+    print(f"\n  BUY IT NOW (base cards, sorted by price):")
     try:
         r2 = httpx.get(
             f"{s.ebay_base_url}/buy/browse/v1/item_summary/search",
             headers=hdrs,
-            params={"q": query, "limit": 25, "filter": "buyingOptions:{FIXED_PRICE}"},
+            params={
+                "q": query,
+                "limit": 25,
+                "filter": "buyingOptions:{FIXED_PRICE}",
+                "sort": "price",
+            },
             timeout=30,
         )
         r2.raise_for_status()
         bins = r2.json().get("itemSummaries", [])
-        base_b = []
-        other_b = []
+        base_bins = []
         for b in bins:
-            price = float(b.get("price", {}).get("value", 0))
             title = b.get("title", "")
             label = classify(title, expected_set)
-            if label == "BASE":
-                base_b.append((price, title, label))
-            else:
-                other_b.append((price, title, label))
+            if label != "BASE":
+                continue
+            price = float(b.get("price", {}).get("value", 0))
+            base_bins.append((price, title))
 
-        if base_b:
-            base_b.sort(key=lambda x: x[0])
-            print(f"    BASE CARD BIN ({len(base_b)}):")
-            for p, t, l in base_b[:5]:
-                print(f"      ${p:>8.2f}  {t[:70]}")
+        if base_bins:
+            base_bins.sort(key=lambda x: x[0])
+            for p, t in base_bins[:5]:
+                disc = discount_pct(p, fmv) if fmv else 0
+                flag = ""
+                if disc >= 20:
+                    flag = " ** BIN DEAL"
+                elif disc >= 10:
+                    flag = " * BELOW FMV"
+                print(f"    ${p:>8.2f}  {disc:+.0f}% vs FMV{flag}")
+                print(f"      {t[:75]}")
+                if fmv and disc >= 10:
+                    all_deals.append((player, "BIN", p, fmv, disc, 0, 0, "now", t))
         else:
-            print(f"    BASE CARD BIN: NONE")
+            print(f"    No base card BINs found")
 
-        if other_b:
-            other_b.sort(key=lambda x: x[0])
-            print(f"    Parallels/Other BIN ({len(other_b)}):")
-            for p, t, l in other_b[:3]:
-                print(f"      ${p:>8.2f}  [{l}]")
-                print(f"        {t[:75]}")
     except Exception as e:
         print(f"    Error: {e}")
+
+# --- DEAL SUMMARY ---
+print(f"\n{'='*95}")
+print(f"DEAL SUMMARY (all cards >10% below FMV)")
+print(f"{'='*95}")
+if all_deals:
+    all_deals.sort(key=lambda x: -x[4])  # best discount first
+    for player, typ, price, fmv_val, disc, h, bids, end, title in all_deals:
+        if typ == "AUCTION":
+            print(f"  {disc:+.0f}%  ${price:>8.2f} (FMV ${fmv_val:,.0f})  {player}  AUCTION  bids={bids} ends={end} ({h:.1f}h)")
+        else:
+            print(f"  {disc:+.0f}%  ${price:>8.2f} (FMV ${fmv_val:,.0f})  {player}  BIN NOW")
+        print(f"         {title[:70]}")
+else:
+    print("  No deals found >10% below FMV")
 
 print(f"\n{'='*95}")
 print("DONE")

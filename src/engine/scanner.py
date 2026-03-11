@@ -25,6 +25,7 @@ JUNK_KEYWORDS = [
     "case hit", "lot of", "pick your",
     "magazine", "poster", "book ", "program", "ticket stub",
     "display case", "holder only", "empty box",
+    " lot ", "card lot",
 ]
 
 # Non-PSA grading companies

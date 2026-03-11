@@ -123,6 +123,15 @@ def _match_listing_to_catalog(title: str, player: str, catalog_cards: list[dict]
             else:
                 continue  # wrong card number, skip
 
+        # Check year match — extract year from set name
+        set_year_match = re.search(r"\b(19\d{2}|20\d{2})\b", sname)
+        title_years = set(re.findall(r"\b(19\d{2}|20\d{2})\b", t))
+        if set_year_match and title_years:
+            if set_year_match.group(1) in title_years:
+                score += 3
+            else:
+                score -= 5  # wrong year is a strong negative signal
+
         # Check if set name keywords appear in title
         # e.g., "2023 Panini Prizm" -> look for "prizm" in title
         set_words = re.findall(r"\b\w{4,}\b", sname)
@@ -132,26 +141,38 @@ def _match_listing_to_catalog(title: str, player: str, catalog_cards: list[dict]
 
         # Check for parallel/variation match
         # Catalog product names use [brackets] for parallels
+        parallel_kws = [
+            "silver", "gold", "green", "blue", "red", "purple", "pink",
+            "orange", "ice", "wave", "refractor", "mojo", "disco",
+            "fast break", "hyper", "pulsar", "shimmer", "camo",
+            "holo", "neon", "scope", "cracked", "ruby", "tie-dye",
+            "snakeskin", "tiger", "zebra", "peacock", "choice",
+            "x-fractor", "xfractor",
+        ]
         bracket_match = re.search(r"\[(.+?)\]", pname)
+        listing_has_parallel = any(pk in t for pk in parallel_kws)
+
         if bracket_match:
+            # Catalog card IS a parallel — listing must mention the parallel name
             parallel = bracket_match.group(1).lower()
-            parallel_words = parallel.split()
-            for pw in parallel_words:
-                if pw in t:
-                    score += 3
-                else:
-                    score -= 2  # penalty for parallel not in title
+            # Get the distinctive parallel words (not generic ones like "prizm")
+            generic_words = {"prizm", "holo", "card", "the", "and", "ice"}
+            parallel_words = [w for w in parallel.split() if len(w) > 2 and w not in generic_words]
+            if parallel_words:
+                matched_words = sum(1 for pw in parallel_words if pw in t)
+                if matched_words == 0:
+                    continue  # listing doesn't mention this parallel — skip
+                score += matched_words * 5
+            else:
+                # Parallel name is only generic words (e.g., [Holo], [Ice])
+                # Check if the full parallel phrase appears
+                if parallel not in t:
+                    continue
+                score += 5
         else:
-            # Base card — penalize if title has known parallel keywords
-            parallel_kws = [
-                "silver", "gold", "green", "blue", "red", "purple", "pink",
-                "orange", "ice", "wave", "refractor", "mojo", "disco",
-                "fast break", "hyper", "pulsar", "shimmer", "camo",
-            ]
-            for pk in parallel_kws:
-                if pk in t:
-                    score -= 3
-                    break
+            # Catalog card is BASE — listing should NOT have parallel keywords
+            if listing_has_parallel:
+                continue  # listing is a parallel, catalog card is base — skip
 
         if score > best_score:
             best_score = score

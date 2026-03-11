@@ -1,10 +1,20 @@
-"""PSA API client for certificate verification."""
+"""PSA API client for certificate verification.
 
+Supports two auth modes:
+1. Direct API token (PSA_API_KEY env var) — if you already have a bearer token
+2. OAuth login (PSA_USERNAME + PSA_PASSWORD) — exchanges credentials for a token
+
+Free tier: 100 API calls/day.
+"""
+
+import re
 import httpx
 
 from config.settings import get_settings
 
-BASE_URL = "https://api.psacard.com/publicapi/cert/GetByCertNumber"
+BASE_URL = "https://api.psacard.com/publicapi"
+TOKEN_URL = f"{BASE_URL}/account/GetToken"
+CERT_URL = f"{BASE_URL}/cert/GetByCertNumber"
 
 
 class PSAClient:
@@ -12,11 +22,42 @@ class PSAClient:
 
     def __init__(self, settings=None):
         self.settings = settings or get_settings()
-        self.api_key = self.settings.psa_api_key
+        self._token: str | None = None
+
+    def _get_token(self) -> str:
+        """Get bearer token, using cached value if available."""
+        if self._token:
+            return self._token
+
+        # Option 1: direct API key / token
+        if self.settings.psa_api_key:
+            self._token = self.settings.psa_api_key
+            return self._token
+
+        # Option 2: OAuth password grant
+        if self.settings.psa_username and self.settings.psa_password:
+            resp = httpx.post(
+                TOKEN_URL,
+                json={
+                    "userNameOrEmail": self.settings.psa_username,
+                    "password": self.settings.psa_password,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data.get("token") or data.get("access_token")
+            if not self._token:
+                raise ValueError(f"PSA auth returned no token: {data}")
+            return self._token
+
+        raise ValueError(
+            "No PSA credentials configured. Set PSA_API_KEY or PSA_USERNAME + PSA_PASSWORD in .env"
+        )
 
     def _headers(self) -> dict:
         return {
-            "Authorization": f"bearer {self.api_key}",
+            "Authorization": f"bearer {self._get_token()}",
             "Content-Type": "application/json",
         }
 
@@ -26,9 +67,12 @@ class PSAClient:
         Returns dict with: subject, grade, card_number, year, brand, variety,
                           label_type, reverse_cert_number, or None if not found.
         """
+        # Clean cert number — strip spaces, leading zeros
+        cert_number = str(cert_number).strip().lstrip("0") or "0"
+
         try:
             resp = httpx.get(
-                f"{BASE_URL}/{cert_number}",
+                f"{CERT_URL}/{cert_number}",
                 headers=self._headers(),
                 timeout=30,
             )
@@ -53,7 +97,8 @@ class PSAClient:
                 "reverse_cert": cert.get("ReverseBarcodeNumber", ""),
                 "is_authentic": cert.get("IsPSADNACert", False),
             }
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            print(f"PSA API error for cert {cert_number}: {e}")
             return None
 
     def _parse_grade(self, grade_str: str) -> float | None:
@@ -88,3 +133,69 @@ class PSAClient:
             "match": match,
             **result,
         }
+
+    def verify_listing(self, listing: dict) -> dict:
+        """Verify a scanned listing by extracting cert number from the title/description.
+
+        Looks for PSA cert numbers in the listing title (common patterns:
+        "PSA 10 #12345678", "cert 12345678", 8-digit numbers near "PSA").
+
+        Returns the listing dict with added 'psa_verified' field.
+        """
+        title = listing.get("title", "")
+        cert_num = extract_cert_number(title)
+
+        if not cert_num:
+            listing["psa_verified"] = None  # no cert number found
+            return listing
+
+        result = self.verify_and_match(
+            cert_number=cert_num,
+            expected_player=listing.get("player"),
+        )
+
+        listing["psa_verified"] = result
+        listing["psa_cert_number"] = cert_num
+
+        # Flag mismatches
+        if result.get("verified"):
+            expected_grade = listing.get("grade", "")
+            psa_grade = result.get("grade")
+            if psa_grade and expected_grade:
+                grade_num = re.search(r"\d+", expected_grade)
+                if grade_num and float(grade_num.group()) != psa_grade:
+                    listing["psa_grade_mismatch"] = True
+
+        return listing
+
+
+def extract_cert_number(text: str) -> str | None:
+    """Extract PSA cert number from text.
+
+    Looks for 7-10 digit numbers near PSA-related keywords.
+    Common patterns:
+    - "PSA 10 #12345678"
+    - "PSA 10 Cert# 12345678"
+    - "PSA 10 (cert 12345678)"
+    - Just a standalone 8-digit number when PSA is mentioned
+    """
+    t = text.lower()
+    if "psa" not in t:
+        return None
+
+    # Pattern 1: cert/certification followed by number
+    m = re.search(r"cert(?:ification)?[#:\s]*(\d{7,10})", t)
+    if m:
+        return m.group(1)
+
+    # Pattern 2: # followed by 8+ digit number (not card numbers which are shorter)
+    m = re.search(r"#(\d{8,10})", t)
+    if m:
+        return m.group(1)
+
+    # Pattern 3: standalone 8-10 digit number (likely cert number)
+    numbers = re.findall(r"\b(\d{8,10})\b", t)
+    if len(numbers) == 1:
+        return numbers[0]
+
+    return None

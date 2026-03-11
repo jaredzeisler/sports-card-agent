@@ -14,6 +14,7 @@ import httpx
 from config.settings import get_settings
 from config.targets import ALL_PLAYERS
 from src.engine.catalog import load_catalog, get_player_cards
+from src.api.psa import PSAClient, extract_cert_number
 
 MAX_HOURS = 12  # only show auctions ending within this window
 
@@ -371,7 +372,73 @@ def scan_all(
 
     # Sort: highest % below FMV first
     all_results.sort(key=lambda r: -r["pct_below_fmv"])
+
+    # PSA verification on top deals (uses 100/day free limit wisely)
+    all_results = _verify_top_deals(all_results, settings)
+
     return all_results
+
+
+def _verify_top_deals(results: list[dict], settings) -> list[dict]:
+    """Run PSA cert verification on listings that have cert numbers.
+
+    Only verifies listings that:
+    1. Are graded (not raw)
+    2. Have a cert number extractable from the title
+    3. Are above a meaningful discount threshold (>20% below FMV)
+
+    Limits to 50 verifications per scan to stay within free tier.
+    """
+    try:
+        psa = PSAClient(settings=settings)
+        psa._get_token()  # test auth — fail fast if no credentials
+    except (ValueError, Exception) as e:
+        print(f"  PSA verification skipped: {e}")
+        return results
+
+    verified_count = 0
+    max_verifications = 50  # save half the daily quota
+
+    for r in results:
+        if verified_count >= max_verifications:
+            break
+
+        # Only verify graded cards with good deals
+        if r["grade"] == "raw":
+            continue
+        if r["pct_below_fmv"] < 20:
+            continue
+
+        cert_num = extract_cert_number(r["title"])
+        if not cert_num:
+            continue
+
+        verified_count += 1
+        psa_result = psa.verify_and_match(
+            cert_number=cert_num,
+            expected_player=r["player"],
+        )
+
+        r["psa_verified"] = psa_result.get("verified", False)
+        r["psa_cert_number"] = cert_num
+
+        if psa_result.get("verified"):
+            r["psa_grade_confirmed"] = psa_result.get("grade")
+            r["psa_subject"] = psa_result.get("subject", "")
+            r["psa_player_match"] = psa_result.get("match", False)
+
+            # Flag grade mismatches
+            expected_num = re.search(r"\d+", r["grade"])
+            if expected_num and psa_result.get("grade"):
+                if float(expected_num.group()) != psa_result["grade"]:
+                    r["psa_grade_mismatch"] = True
+
+        time.sleep(0.3)  # gentle rate limiting
+
+    if verified_count > 0:
+        print(f"  PSA verified {verified_count} listings")
+
+    return results
 
 
 def print_results(results: list[dict], min_pct: float = -999):
@@ -382,9 +449,9 @@ def print_results(results: list[dict], min_pct: float = -999):
         print("No results found.")
         return
 
-    print(f"\n{'='*110}")
-    print(f"{'% FMV':>7} {'Price':>9} {'FMV':>9} {'Grade':<7} {'Type':<8} {'Player':<24} {'Matched Card':<40}")
-    print(f"{'='*110}")
+    print(f"\n{'='*120}")
+    print(f"{'% FMV':>7} {'Price':>9} {'FMV':>9} {'Grade':<7} {'Type':<8} {'PSA':>4} {'Player':<24} {'Matched Card':<40}")
+    print(f"{'='*120}")
 
     for r in filtered:
         pct = r["pct_below_fmv"]
@@ -393,10 +460,23 @@ def print_results(results: list[dict], min_pct: float = -999):
         if r["listing_type"] == "auction" and r.get("hours_left") is not None:
             time_str = f" ({r['hours_left']}h, {r['bids']}bid)"
 
+        # PSA status indicator
+        psa_status = ""
+        if r.get("psa_grade_mismatch"):
+            psa_status = "FAKE"
+        elif r.get("psa_verified") is True and r.get("psa_player_match"):
+            psa_status = "OK"
+        elif r.get("psa_verified") is True and not r.get("psa_player_match"):
+            psa_status = "BAD"
+        elif r.get("psa_verified") is False:
+            psa_status = "???"
+        else:
+            psa_status = "  -"
+
         print(
             f"{pct:>+6.0f}% ${r['price']:>8.2f} ${r['fmv']:>8.2f} "
-            f"{r['grade']:<7} {typ:<8} {r['player']:<24} "
-            f"{r['matched_card'][:40]}"
+            f"{r['grade']:<7} {typ:<8} {psa_status:>4} "
+            f"{r['player']:<24} {r['matched_card'][:40]}"
         )
         if time_str:
             print(f"        {time_str}")

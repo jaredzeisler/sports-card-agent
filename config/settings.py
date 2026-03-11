@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     # PSA
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
+    psa_username: str = Field(default="", alias="PSA_USERNAME")
+    psa_password: str = Field(default="", alias="PSA_PASSWORD")
 
     # Anthropic
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")

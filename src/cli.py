@@ -422,5 +422,82 @@ def targets(min_profit):
     console.print(table)
 
 
+# ── Grade ──────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("image_path", type=click.Path(exists=True))
+def grade(image_path):
+    """Assess a card's likely PSA/BGS grade from an image."""
+    from src.engine.grader import assess_grade
+
+    console.print(f"[dim]Analyzing card image: {image_path}[/]")
+    result = assess_grade(image_path)
+
+    if result is None:
+        console.print("[red]No Anthropic API key configured. Set ANTHROPIC_API_KEY in .env[/]")
+        return
+
+    if "error" in result:
+        console.print(f"[red]Error: {result['error']}[/]")
+        return
+
+    # Card identification
+    card = result.get("card", {})
+    if card:
+        console.print("\n[bold]Card Identified[/]")
+        if card.get("player"):
+            console.print(f"  Player:    {card['player']}")
+        if card.get("year"):
+            console.print(f"  Year:      {card['year']}")
+        if card.get("brand"):
+            console.print(f"  Brand:     {card['brand']}")
+        if card.get("set_name"):
+            console.print(f"  Set:       {card['set_name']}")
+        if card.get("variation"):
+            console.print(f"  Variation: {card['variation']}")
+        if card.get("serial"):
+            console.print(f"  Serial:    {card['serial']}")
+
+    # Sub-grades table
+    subs = result.get("sub_grades", {})
+    if subs:
+        console.print()
+        table = Table(title="Sub-Grade Assessment")
+        table.add_column("Category", style="cyan")
+        table.add_column("Score", justify="right")
+        table.add_column("Rating")
+
+        for category in ["centering", "corners", "edges", "surface"]:
+            score = subs.get(category)
+            if score is not None:
+                if score >= 9:
+                    rating = "[green]Excellent[/]"
+                elif score >= 7:
+                    rating = "[yellow]Good[/]"
+                elif score >= 5:
+                    rating = "[red]Fair[/]"
+                else:
+                    rating = "[red bold]Poor[/]"
+                table.add_row(category.capitalize(), f"{score:.1f}", rating)
+
+        console.print(table)
+
+    # Grade estimates
+    console.print()
+    if result.get("psa_estimate"):
+        psa = result["psa_estimate"]
+        label = result.get("psa_label", "")
+        console.print(f"  [bold green]PSA Estimate:[/] {psa:.0f} — {label}")
+    if result.get("bgs_estimate"):
+        bgs = result["bgs_estimate"]
+        label = result.get("bgs_label", "")
+        console.print(f"  [bold blue]BGS Estimate:[/] {bgs:.1f} — {label}")
+
+    if result.get("notes"):
+        console.print(f"\n  [dim]Notes: {result['notes']}[/]")
+
+    console.print()
+
+
 if __name__ == "__main__":
     cli()

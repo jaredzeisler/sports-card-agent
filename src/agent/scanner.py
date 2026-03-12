@@ -14,10 +14,13 @@ from src.models.card import Listing
 DEFAULT_SEARCHES = [
     "PSA 10 Luka Doncic Prizm rookie",
     "PSA 10 Jayson Tatum Prizm rookie",
+    "PSA 10 Jayson Tatum Topps Chrome refractor",
     "PSA 10 Anthony Edwards Prizm rookie",
     "PSA 10 Victor Wembanyama Prizm rookie",
     "PSA 10 Ja Morant Prizm rookie",
     "PSA 9 LeBron James Topps Chrome rookie",
+    "BGS 9.5 Jayson Tatum Topps Chrome rookie",
+    "PSA 10 Jayson Tatum Optic rookie",
 ]
 
 

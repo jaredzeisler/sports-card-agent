@@ -34,7 +34,8 @@ class TradingAgent:
                     self._handle_buy_deal(deal, session, dry_run)
                 elif deal["action"] == "hold":
                     notify_deal_found(
-                        deal["player"], deal["price"], deal["fmv"], deal["score"]
+                        deal["player"], deal["price"], deal["fmv"], deal["score"],
+                        url=deal.get("listing_url"),
                     )
         finally:
             session.close()
@@ -65,7 +66,8 @@ class TradingAgent:
             # Auto-execute
             if dry_run:
                 notify_deal_found(
-                    deal["player"], price, deal["fmv"], deal["score"]
+                    deal["player"], price, deal["fmv"], deal["score"],
+                    url=deal.get("listing_url"),
                 )
                 return
             self._execute_buy(deal, session)
@@ -164,7 +166,7 @@ class TradingAgent:
         )
         session.add(approval)
         session.commit()
-        notify_approval_needed(deal["player"], deal["price"], deal["fmv"])
+        notify_approval_needed(deal["player"], deal["price"], deal["fmv"], url=deal.get("listing_url"))
 
     def execute_approval(self, approval_id: int) -> bool:
         """Execute a previously approved trade."""

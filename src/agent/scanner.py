@@ -259,6 +259,7 @@ class MarketScanner:
                 "reasons": analysis["reasons"],
                 "estimated_profit": analysis["estimated_profit"],
                 "profit_margin": analysis["profit_margin"],
+                "listing_url": item.get("itemWebUrl"),
             }
         except Exception:
             return None

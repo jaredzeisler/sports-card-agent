@@ -29,12 +29,18 @@ class Settings(BaseSettings):
     min_profit_margin: float = Field(default=0.15, alias="AGENT_MIN_PROFIT_MARGIN")
     scan_interval_minutes: int = Field(default=30, alias="AGENT_SCAN_INTERVAL_MINUTES")
 
-    # Notifications
+    # Notifications — Email
     notification_email: str = Field(default="", alias="NOTIFICATION_EMAIL")
     smtp_host: str = Field(default="", alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str = Field(default="", alias="SMTP_USER")
     smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+
+    # Notifications — SMS (Twilio)
+    twilio_account_sid: str = Field(default="", alias="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")
+    twilio_from_number: str = Field(default="", alias="TWILIO_FROM_NUMBER")
+    sms_to_number: str = Field(default="", alias="SMS_TO_NUMBER")
 
     # Database
     database_url: str = Field(default="sqlite:///sports_cards.db", alias="DATABASE_URL")

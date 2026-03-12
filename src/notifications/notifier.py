@@ -4,6 +4,8 @@ import smtplib
 from email.mime.text import MIMEText
 from rich.console import Console
 
+import httpx
+
 from config.settings import get_settings
 
 console = Console()
@@ -21,6 +23,7 @@ def notify_deal_found(player: str, price: float, fmv: float, score: float, *, ur
     console.print(f"[green bold]{msg}[/]")
     _send_email("Deal Found", msg)
     _send_sms(msg)
+    _send_ntfy("Deal Found", msg, url=url)
 
 
 def notify_trade_executed(action: str, player: str, price: float):
@@ -29,6 +32,7 @@ def notify_trade_executed(action: str, player: str, price: float):
     console.print(f"[cyan bold]{msg}[/]")
     _send_email(f"Trade Executed: {action}", msg)
     _send_sms(msg)
+    _send_ntfy(f"Trade Executed: {action}", msg)
 
 
 def notify_approval_needed(player: str, price: float, fmv: float, *, url: str | None = None):
@@ -42,12 +46,37 @@ def notify_approval_needed(player: str, price: float, fmv: float, *, url: str | 
     console.print(f"[yellow bold]{msg}[/]")
     _send_email("Approval Needed", msg)
     _send_sms(msg)
+    _send_ntfy("Approval Needed", msg, url=url, priority="high")
 
 
 def notify_error(context: str, error: str):
     """Alert on errors."""
     msg = f"Error in {context}: {error}"
     console.print(f"[red bold]{msg}[/]")
+
+
+def _send_ntfy(title: str, body: str, *, url: str | None = None, priority: str = "default"):
+    """Send push notification via ntfy.sh (free, no account needed)."""
+    settings = get_settings()
+    if not settings.ntfy_topic:
+        return
+    try:
+        headers = {
+            "Title": f"[CardAgent] {title}",
+            "Priority": priority,
+            "Tags": "money_with_wings" if "buy" in title.lower() or "deal" in title.lower() else "chart_with_upwards_trend",
+        }
+        if url:
+            headers["Click"] = url
+            headers["Actions"] = f"view, Open on eBay, {url}"
+        httpx.post(
+            f"https://ntfy.sh/{settings.ntfy_topic}",
+            content=body,
+            headers=headers,
+            timeout=10,
+        )
+    except Exception:
+        pass  # Don't crash the agent over notification failures
 
 
 def _send_sms(body: str):

@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     twilio_from_number: str = Field(default="", alias="TWILIO_FROM_NUMBER")
     sms_to_number: str = Field(default="", alias="SMS_TO_NUMBER")
 
+    # Notifications — Push (ntfy.sh, free, no account needed)
+    ntfy_topic: str = Field(default="", alias="NTFY_TOPIC")
+
     # Database
     database_url: str = Field(default="sqlite:///sports_cards.db", alias="DATABASE_URL")
 

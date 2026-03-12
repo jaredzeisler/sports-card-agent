@@ -24,8 +24,8 @@ class Settings(BaseSettings):
 
     # Agent limits
     auto_buy_limit: float = Field(default=50.0, alias="AGENT_AUTO_BUY_LIMIT")
-    max_portfolio_value: float = Field(default=5000.0, alias="AGENT_MAX_PORTFOLIO_VALUE")
-    max_single_card: float = Field(default=500.0, alias="AGENT_MAX_SINGLE_CARD")
+    max_portfolio_value: float = Field(default=500000.0, alias="AGENT_MAX_PORTFOLIO_VALUE")
+    max_single_card: float = Field(default=5000.0, alias="AGENT_MAX_SINGLE_CARD")
     min_profit_margin: float = Field(default=0.15, alias="AGENT_MIN_PROFIT_MARGIN")
     scan_interval_minutes: int = Field(default=30, alias="AGENT_SCAN_INTERVAL_MINUTES")
 

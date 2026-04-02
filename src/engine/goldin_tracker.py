@@ -1,16 +1,30 @@
-"""Goldin auction tracker — live bid monitoring with FMV analysis.
+"""Goldin auction tracker — seller defense mode.
 
-Combines GoldinClient live scraping with the comp ladder pricing engine
-to track bids in real-time and flag actionable opportunities.
+You are the SELLER. You get hammer price + 15% (1.15x hammer).
+The buyer pays hammer + 22% to Goldin. Goldin keeps the 7% spread.
+
+This tracker tells you which lots are in danger of selling below what
+you'd get on eBay, and calculates your defense floor for each card.
+
+Fee structure:
+  - You receive: hammer × 1.15 (hammer plus 15% consignment bonus)
+  - Buyer pays: hammer × 1.22 (hammer plus 22% buyer's premium)
+  - Goldin keeps: the 7% spread between buyer premium and your payout
+  - Alternative: eBay resale FMV minus 16.25% eBay fees
+  - Defense floor: minimum hammer where Goldin net >= eBay net
 """
 
 from datetime import datetime, timezone
 
-from src.api.goldin import GoldinClient, BUYER_PREMIUM_RATE
+from src.api.goldin import GoldinClient
 from src.engine.pricing import EBAY_SELLER_FEE_RATE
+
+# You get 115% of hammer price
+GOLDIN_SELLER_NET_RATE = 1.15
 
 
 # FMV estimates: {lot_number: (fmv, confidence%, trend)}
+# FMV = what the card would sell for on eBay at fair market value
 FMV_ESTIMATES = {
     1:  (2200, 55, "stable"),
     2:  (1350, 80, "stable"),
@@ -77,34 +91,60 @@ FMV_ESTIMATES = {
 }
 
 
+def defense_floor(lot_number: int) -> float | None:
+    """Calculate the minimum hammer price where Goldin net >= eBay net.
+
+    Below this price, you're better off pulling the card and selling on eBay.
+
+    Formula:
+      eBay net   = FMV × 0.8375
+      Goldin net = hammer × 1.15
+      Break-even: hammer × 1.15 = FMV × 0.8375
+      Floor = FMV × 0.8375 / 1.15 = FMV × 0.7283
+    """
+    if lot_number not in FMV_ESTIMATES:
+        return None
+    fmv, _, _ = FMV_ESTIMATES[lot_number]
+    ebay_net = fmv * (1 - EBAY_SELLER_FEE_RATE)
+    floor = ebay_net / GOLDIN_SELLER_NET_RATE
+    return round(floor, 2)
+
+
 def analyze_lot(lot: dict) -> dict:
-    """Analyze a single lot against its FMV estimate.
+    """Analyze a single lot from the SELLER's perspective.
 
-    Args:
-        lot: Dict with at least 'lot', 'card', 'current_bid', 'tier', 'pop'
-
-    Returns:
-        Dict with full analysis: all_in_cost, fmv, net_profit, margin, verdict, trend
+    Returns defense status, your net proceeds, how far below/above floor, etc.
     """
     lot_num = lot["lot"]
     fmv_est, confidence, trend = FMV_ESTIMATES.get(lot_num, (0, 0, "stable"))
     current_bid = lot["current_bid"]
-
-    all_in_cost = current_bid * (1 + BUYER_PREMIUM_RATE)
-    ebay_net = fmv_est * (1 - EBAY_SELLER_FEE_RATE)
-    net_profit = ebay_net - all_in_cost
-    margin = (net_profit / all_in_cost * 100) if all_in_cost > 0 else 0
-
     pop = lot.get("pop") or 0
 
-    if margin >= 30 and confidence >= 55:
-        verdict = "BUY"
-    elif margin >= 15 and confidence >= 45:
-        verdict = "WATCH"
-    elif margin >= 0:
-        verdict = "THIN"
+    # What you net from Goldin at current hammer
+    goldin_net = current_bid * GOLDIN_SELLER_NET_RATE
+
+    # What you'd net selling on eBay instead
+    ebay_net = fmv_est * (1 - EBAY_SELLER_FEE_RATE)
+
+    # How much you're losing vs eBay at this hammer price
+    vs_ebay = goldin_net - ebay_net
+
+    # Defense floor — minimum acceptable hammer
+    floor = defense_floor(lot_num) or 0
+
+    # How far current bid is from floor
+    floor_gap = current_bid - floor
+    floor_gap_pct = (floor_gap / floor * 100) if floor > 0 else 0
+
+    # Defense verdict
+    if current_bid >= floor * 1.15:
+        verdict = "SAFE"        # 15%+ above floor — let it ride
+    elif current_bid >= floor:
+        verdict = "CLOSE"       # Above floor but thin — watch it
+    elif current_bid >= floor * 0.85:
+        verdict = "DEFEND"      # Below floor but within 15% — bid it up
     else:
-        verdict = "PASS"
+        verdict = "DANGER"      # Way below floor — needs immediate defense
 
     return {
         "lot": lot_num,
@@ -112,12 +152,15 @@ def analyze_lot(lot: dict) -> dict:
         "tier": lot.get("tier", "?"),
         "player": lot.get("player", ""),
         "current_bid": current_bid,
-        "all_in_cost": round(all_in_cost, 2),
+        "goldin_net": round(goldin_net, 2),
+        "ebay_net": round(ebay_net, 2),
         "fmv": fmv_est,
         "confidence": confidence,
         "trend": trend,
-        "net_profit": round(net_profit, 2),
-        "margin_pct": round(margin, 1),
+        "vs_ebay": round(vs_ebay, 2),
+        "floor": round(floor, 2),
+        "floor_gap": round(floor_gap, 2),
+        "floor_gap_pct": round(floor_gap_pct, 1),
         "verdict": verdict,
         "pop": pop,
         "scarce": 0 < pop < 10,
@@ -125,50 +168,28 @@ def analyze_lot(lot: dict) -> dict:
 
 
 def analyze_all(lots: list[dict]) -> list[dict]:
-    """Analyze all lots and return sorted results."""
-    results = [analyze_lot(lot) for lot in lots]
-    return results
+    """Analyze all lots from seller defense perspective."""
+    return [analyze_lot(lot) for lot in lots]
 
 
-def max_bid_for_target_margin(lot_number: int, target_margin_pct: float = 15.0) -> float | None:
-    """Calculate the maximum hammer price to achieve a target margin.
+def get_danger_lots(lots: list[dict]) -> list[dict]:
+    """Get lots that need immediate defense — sorted by urgency."""
+    results = analyze_all(lots)
+    danger = [r for r in results if r["verdict"] in ("DANGER", "DEFEND")]
+    danger.sort(key=lambda r: r["floor_gap_pct"])  # Most underwater first
+    return danger
 
-    This tells you the max you should bid to still make money.
 
-    Args:
-        lot_number: The lot number
-        target_margin_pct: Desired profit margin after all fees (default 15%)
-
-    Returns:
-        Maximum hammer price (before buyer's premium), or None if no FMV data
-    """
-    if lot_number not in FMV_ESTIMATES:
-        return None
-
-    fmv, _, _ = FMV_ESTIMATES[lot_number]
-    ebay_net = fmv * (1 - EBAY_SELLER_FEE_RATE)
-
-    # all_in = hammer × (1 + premium)
-    # margin = (ebay_net - all_in) / all_in
-    # target = (ebay_net / all_in) - 1
-    # all_in = ebay_net / (1 + target)
-    # hammer = all_in / (1 + premium)
-    target = target_margin_pct / 100
-    all_in = ebay_net / (1 + target)
-    max_hammer = all_in / (1 + BUYER_PREMIUM_RATE)
-
-    return round(max_hammer, 2)
+def get_safe_lots(lots: list[dict]) -> list[dict]:
+    """Get lots that are above defense floor — no action needed."""
+    results = analyze_all(lots)
+    return [r for r in results if r["verdict"] in ("SAFE", "CLOSE")]
 
 
 def refresh_live_bids(lots: list[dict], lot_urls: dict[int, str] | None = None) -> list[dict]:
     """Fetch live bids from Goldin and update lot data.
 
-    Args:
-        lots: The LOTS list to update in-place
-        lot_urls: Optional dict mapping lot numbers to Goldin URLs
-
-    Returns:
-        List of lots that had bid changes, with old and new values
+    Returns list of lots that had bid changes.
     """
     if not lot_urls:
         from Inventory.goldin_auction_2026_04 import LOT_URLS

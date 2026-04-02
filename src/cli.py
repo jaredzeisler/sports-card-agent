@@ -499,20 +499,20 @@ def grade(image_path):
     console.print()
 
 
-# ── Goldin Auction ────────────────────────────────────────────────
+# ── Goldin Auction — SELLER DEFENSE MODE ──────────────────────────
 
 @cli.group()
 def goldin():
-    """Track and analyze Goldin auction lots."""
+    """Defend your Goldin auction lots from low bids."""
     pass
 
 
-@goldin.command("bids")
+@goldin.command("defend")
 @click.option("--tier", type=click.Choice(["A", "B", "C", "D", "all"]), default="all", help="Filter by tier")
 @click.option("--player", default=None, help="Filter by player name")
-@click.option("--sort", "sort_by", type=click.Choice(["lot", "bid", "margin", "fmv"]), default="lot", help="Sort by")
-def goldin_bids(tier, player, sort_by):
-    """Show current bids and FMV analysis for all lots."""
+@click.option("--sort", "sort_by", type=click.Choice(["lot", "bid", "gap", "fmv", "danger"]), default="danger", help="Sort by")
+def goldin_defend(tier, player, sort_by):
+    """Show defense status for all lots — which need protection tonight."""
     from Inventory.goldin_auction_2026_04 import LOTS
     from src.engine.goldin_tracker import analyze_all
 
@@ -528,59 +528,80 @@ def goldin_bids(tier, player, sort_by):
     sort_keys = {
         "lot": lambda r: r["lot"],
         "bid": lambda r: -r["current_bid"],
-        "margin": lambda r: -r["margin_pct"],
+        "gap": lambda r: r["floor_gap_pct"],
         "fmv": lambda r: -r["fmv"],
+        "danger": lambda r: (
+            {"DANGER": 0, "DEFEND": 1, "CLOSE": 2, "SAFE": 3}[r["verdict"]],
+            r["floor_gap_pct"],
+        ),
     }
     results.sort(key=sort_keys[sort_by])
 
-    table = Table(title=f"Goldin Auction — {len(results)} Lots")
+    table = Table(title=f"SELLER DEFENSE — {len(results)} Lots (you get 115% of hammer)")
     table.add_column("#", justify="right", style="dim")
-    table.add_column("Card", style="cyan", max_width=45)
-    table.add_column("Tier", justify="center")
+    table.add_column("Card", style="cyan", max_width=40)
+    table.add_column("T", justify="center")
     table.add_column("Bid", justify="right")
-    table.add_column("All-In", justify="right")
-    table.add_column("FMV", justify="right")
-    table.add_column("Net", justify="right")
-    table.add_column("Margin", justify="right")
+    table.add_column("You Net", justify="right")
+    table.add_column("eBay Net", justify="right")
+    table.add_column("Floor", justify="right")
+    table.add_column("vs Floor", justify="right")
     table.add_column("Trend", justify="center")
-    table.add_column("Verdict", style="bold")
+    table.add_column("Status", style="bold")
 
     for r in results:
-        trend_arrow = {"up": "[green]↑[/]", "stable": "[yellow]→[/]", "down": "[red]↓[/]"}.get(r["trend"], "?")
-        verdict_color = {"BUY": "green bold", "WATCH": "yellow", "THIN": "dim", "PASS": "red dim"}.get(r["verdict"], "white")
-        profit_color = "green" if r["net_profit"] > 0 else "red"
-        scarce = " *" if r["scarce"] else ""
+        trend_arrow = {"up": "[green]^[/]", "stable": "[yellow]-[/]", "down": "[red]v[/]"}.get(r["trend"], "?")
+        verdict_color = {
+            "DANGER": "red bold reverse",
+            "DEFEND": "red bold",
+            "CLOSE": "yellow bold",
+            "SAFE": "green",
+        }.get(r["verdict"], "white")
+        net_color = "green" if r["vs_ebay"] >= 0 else "red"
+        gap_color = "green" if r["floor_gap"] >= 0 else "red"
 
         table.add_row(
             str(r["lot"]),
-            r["card"][:45] + scarce,
+            r["card"][:40],
             r["tier"],
             f"${r['current_bid']:,}",
-            f"${r['all_in_cost']:,.0f}",
-            f"${r['fmv']:,}",
-            f"[{profit_color}]${r['net_profit']:,.0f}[/]",
-            f"{r['margin_pct']:.1f}%",
+            f"[{net_color}]${r['goldin_net']:,.0f}[/]",
+            f"${r['ebay_net']:,.0f}",
+            f"${r['floor']:,.0f}",
+            f"[{gap_color}]{r['floor_gap_pct']:+.0f}%[/]",
             trend_arrow,
             f"[{verdict_color}]{r['verdict']}[/]",
         )
 
     console.print(table)
-    console.print("[dim]  * = Low population (scarce)[/]")
 
-    buys = [r for r in results if r["verdict"] == "BUY"]
-    watches = [r for r in results if r["verdict"] == "WATCH"]
-    if buys:
-        console.print(f"\n[green bold]{len(buys)} BUY opportunities[/]")
-    if watches:
-        console.print(f"[yellow]{len(watches)} WATCH candidates[/]")
+    # Summary counts
+    danger = [r for r in results if r["verdict"] == "DANGER"]
+    defend = [r for r in results if r["verdict"] == "DEFEND"]
+    close = [r for r in results if r["verdict"] == "CLOSE"]
+    safe = [r for r in results if r["verdict"] == "SAFE"]
+
+    console.print()
+    if danger:
+        total_lost = sum(r["vs_ebay"] for r in danger)
+        console.print(f"[red bold reverse] DANGER [/] {len(danger)} lots way below floor — losing ${abs(total_lost):,.0f} vs eBay")
+    if defend:
+        console.print(f"[red bold] DEFEND [/] {len(defend)} lots below floor — bid these up")
+    if close:
+        console.print(f"[yellow bold] CLOSE  [/] {len(close)} lots near floor — keep watching")
+    if safe:
+        console.print(f"[green] SAFE   [/] {len(safe)} lots above floor — let them ride")
+
+    console.print(f"\n[dim]Floor = min hammer where Goldin payout (115%) >= eBay net (FMV x 83.75%)[/]")
+    console.print(f"[dim]DANGER = >15% below floor | DEFEND = below floor | CLOSE = above but tight | SAFE = 15%+ above[/]")
 
 
 @goldin.command("lot")
 @click.argument("lot_number", type=int)
 def goldin_lot(lot_number):
-    """Show detailed analysis for a single lot."""
+    """Show detailed defense analysis for a single lot."""
     from Inventory.goldin_auction_2026_04 import LOTS
-    from src.engine.goldin_tracker import analyze_lot, max_bid_for_target_margin
+    from src.engine.goldin_tracker import analyze_lot, defense_floor
 
     lot = None
     for l in LOTS:
@@ -593,7 +614,7 @@ def goldin_lot(lot_number):
         return
 
     r = analyze_lot(lot)
-    verdict_color = {"BUY": "green", "WATCH": "yellow", "THIN": "dim", "PASS": "red"}.get(r["verdict"], "white")
+    verdict_color = {"DANGER": "red bold", "DEFEND": "red", "CLOSE": "yellow", "SAFE": "green"}.get(r["verdict"], "white")
     trend_word = {"up": "Trending Up", "stable": "Stable", "down": "Trending Down"}.get(r["trend"], "Unknown")
 
     console.print(f"\n[bold]Lot #{r['lot']}:[/] {r['card']}")
@@ -602,25 +623,33 @@ def goldin_lot(lot_number):
     console.print(f"  Grade:        {lot.get('grade') or 'Raw'}")
     console.print(f"  Population:   {r['pop'] or 'N/A'}{'  [yellow bold]SCARCE[/]' if r['scarce'] else ''}")
     console.print()
-    console.print(f"  Current Bid:  ${r['current_bid']:,}")
-    console.print(f"  + 20% Premium: ${r['all_in_cost']:,.0f}")
-    console.print(f"  Est. FMV:     ${r['fmv']:,}")
-    console.print(f"  Confidence:   {r['confidence']}%")
-    console.print(f"  Trend:        {trend_word}")
+
+    console.print(f"  [bold]Current Bid:  ${r['current_bid']:,}[/]")
+    console.print(f"  You Get (115%):  ${r['goldin_net']:,.0f}")
+    console.print(f"  eBay Alt Net:   ${r['ebay_net']:,.0f}  (FMV ${r['fmv']:,} - 16.25% fees)")
+    console.print(f"  Confidence:     {r['confidence']}%")
+    console.print(f"  Trend:          {trend_word}")
     console.print()
 
-    profit_color = "green" if r["net_profit"] > 0 else "red"
-    console.print(f"  Net Profit:   [{profit_color}]${r['net_profit']:,.0f}[/]  (after 20% BP + 16.25% eBay fees)")
-    console.print(f"  Margin:       [{profit_color}]{r['margin_pct']:.1f}%[/]")
-    console.print(f"  Verdict:      [{verdict_color}]{r['verdict']}[/]")
+    # Defense floor
+    floor = r["floor"]
+    gap_color = "green" if r["floor_gap"] >= 0 else "red"
+    console.print(f"  [bold]Defense Floor:   ${floor:,.0f}[/]  (min hammer to beat eBay)")
+    console.print(f"  Current vs Floor: [{gap_color}]{r['floor_gap_pct']:+.1f}% (${r['floor_gap']:+,.0f})[/]")
     console.print()
 
-    # Max bid targets
-    for target in [30, 20, 15, 10]:
-        max_bid = max_bid_for_target_margin(lot_number, target)
-        if max_bid:
-            bid_ok = "green" if max_bid >= r["current_bid"] else "red"
-            console.print(f"  Max bid for {target}% margin: [{bid_ok}]${max_bid:,.0f}[/]")
+    vs_color = "green" if r["vs_ebay"] >= 0 else "red"
+    console.print(f"  Goldin vs eBay:  [{vs_color}]${r['vs_ebay']:+,.0f}[/]")
+    console.print(f"  Status:          [{verdict_color}]{r['verdict']}[/]")
+    console.print()
+
+    if r["verdict"] in ("DANGER", "DEFEND"):
+        needed = r["floor"] - r["current_bid"]
+        console.print(f"  [red bold]>>> NEEDS ${needed:,.0f} MORE to reach floor <<<[/]")
+    elif r["verdict"] == "CLOSE":
+        console.print(f"  [yellow]Above floor but thin — watch for late snipers[/]")
+    else:
+        console.print(f"  [green]Healthy — let it ride[/]")
 
     console.print()
 
@@ -629,7 +658,7 @@ def goldin_lot(lot_number):
 @click.argument("lot_number", type=int)
 @click.argument("new_bid", type=float)
 def goldin_update(lot_number, new_bid):
-    """Manually update a lot's current bid."""
+    """Update a lot's current bid and show new defense status."""
     from Inventory.goldin_auction_2026_04 import LOTS, update_bid
     from src.engine.goldin_tracker import analyze_lot
 
@@ -648,18 +677,65 @@ def goldin_update(lot_number, new_bid):
 
     change = new_bid - old_bid
     change_pct = (change / old_bid * 100) if old_bid > 0 else 0
-    direction = "[green]↑[/]" if change > 0 else "[red]↓[/]" if change < 0 else "→"
-
-    console.print(f"[bold]Lot #{lot_number}:[/] {lot['card']}")
-    console.print(f"  Bid: ${old_bid:,.0f} → ${new_bid:,.0f}  ({direction} ${abs(change):,.0f}, {change_pct:+.1f}%)")
+    direction = "[green]^[/]" if change > 0 else "[red]v[/]" if change < 0 else "-"
 
     r = analyze_lot(lot)
-    verdict_color = {"BUY": "green", "WATCH": "yellow", "THIN": "dim", "PASS": "red"}.get(r["verdict"], "white")
-    profit_color = "green" if r["net_profit"] > 0 else "red"
-    console.print(f"  All-In: ${r['all_in_cost']:,.0f} | FMV: ${r['fmv']:,} | "
-                  f"Net: [{profit_color}]${r['net_profit']:,.0f}[/] | "
-                  f"Margin: [{profit_color}]{r['margin_pct']:.1f}%[/] | "
-                  f"Verdict: [{verdict_color}]{r['verdict']}[/]")
+    verdict_color = {"DANGER": "red bold", "DEFEND": "red", "CLOSE": "yellow", "SAFE": "green"}.get(r["verdict"], "white")
+    net_color = "green" if r["vs_ebay"] >= 0 else "red"
+
+    console.print(f"[bold]Lot #{lot_number}:[/] {lot['card']}")
+    console.print(f"  Bid: ${old_bid:,.0f} -> ${new_bid:,.0f}  ({direction} ${abs(change):,.0f}, {change_pct:+.1f}%)")
+    console.print(f"  You Net: ${r['goldin_net']:,.0f} | Floor: ${r['floor']:,.0f} | "
+                  f"vs eBay: [{net_color}]${r['vs_ebay']:+,.0f}[/] | "
+                  f"[{verdict_color}]{r['verdict']}[/]")
+
+    if r["verdict"] in ("DANGER", "DEFEND"):
+        needed = r["floor"] - r["current_bid"]
+        console.print(f"  [red bold]Still needs ${needed:,.0f} more to reach floor[/]")
+
+
+@goldin.command("floors")
+@click.option("--tier", type=click.Choice(["A", "B", "C", "D", "all"]), default="all")
+def goldin_floors(tier):
+    """Show defense floor price for every lot — your cheat sheet tonight."""
+    from Inventory.goldin_auction_2026_04 import LOTS
+    from src.engine.goldin_tracker import analyze_all
+
+    lots = LOTS if tier == "all" else [l for l in LOTS if l["tier"] == tier]
+    results = analyze_all(lots)
+
+    table = Table(title=f"DEFENSE FLOORS — Don't let these sell below floor")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Card", style="cyan", max_width=40)
+    table.add_column("T", justify="center")
+    table.add_column("FMV", justify="right")
+    table.add_column("Floor", justify="right", style="bold")
+    table.add_column("Bid Now", justify="right")
+    table.add_column("Gap", justify="right")
+    table.add_column("Status", style="bold")
+
+    for r in results:
+        verdict_color = {
+            "DANGER": "red bold reverse",
+            "DEFEND": "red bold",
+            "CLOSE": "yellow bold",
+            "SAFE": "green",
+        }.get(r["verdict"], "white")
+        gap_color = "green" if r["floor_gap"] >= 0 else "red"
+
+        table.add_row(
+            str(r["lot"]),
+            r["card"][:40],
+            r["tier"],
+            f"${r['fmv']:,}",
+            f"${r['floor']:,.0f}",
+            f"${r['current_bid']:,}",
+            f"[{gap_color}]${r['floor_gap']:+,.0f}[/]",
+            f"[{verdict_color}]{r['verdict']}[/]",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Floor = FMV x 0.8375 / 1.15 = min hammer to match eBay net proceeds[/]")
 
 
 @goldin.command("refresh")
@@ -690,7 +766,7 @@ def goldin_refresh():
     table.add_column("Change", justify="right")
 
     for c in changes:
-        direction = "[green]↑[/]" if c["change"] > 0 else "[red]↓[/]"
+        direction = "[green]^[/]" if c["change"] > 0 else "[red]v[/]"
         table.add_row(
             str(c["lot"]),
             c["card"][:40],
@@ -700,53 +776,6 @@ def goldin_refresh():
         )
 
     console.print(table)
-
-
-@goldin.command("maxbid")
-@click.option("--margin", default=15.0, help="Target profit margin %")
-@click.option("--tier", type=click.Choice(["A", "B", "C", "D", "all"]), default="all")
-def goldin_maxbid(margin, tier):
-    """Show maximum bid prices to hit a target margin for each lot."""
-    from Inventory.goldin_auction_2026_04 import LOTS
-    from src.engine.goldin_tracker import max_bid_for_target_margin
-
-    lots = LOTS if tier == "all" else [l for l in LOTS if l["tier"] == tier]
-
-    table = Table(title=f"Max Bids for {margin:.0f}% Target Margin")
-    table.add_column("#", justify="right", style="dim")
-    table.add_column("Card", style="cyan", max_width=45)
-    table.add_column("Current", justify="right")
-    table.add_column(f"Max Bid", justify="right")
-    table.add_column("Room", justify="right")
-    table.add_column("Status", style="bold")
-
-    for lot in lots:
-        max_bid = max_bid_for_target_margin(lot["lot"], margin)
-        if max_bid is None:
-            continue
-
-        current = lot["current_bid"]
-        room = max_bid - current
-        pct_room = (room / current * 100) if current > 0 else 0
-
-        if room > 0:
-            status = "[green]UNDER[/]"
-            room_str = f"[green]+${room:,.0f} ({pct_room:+.1f}%)[/]"
-        else:
-            status = "[red]OVER[/]"
-            room_str = f"[red]${room:,.0f} ({pct_room:+.1f}%)[/]"
-
-        table.add_row(
-            str(lot["lot"]),
-            lot["card"][:45],
-            f"${current:,}",
-            f"${max_bid:,.0f}",
-            room_str,
-            status,
-        )
-
-    console.print(table)
-    console.print(f"\n[dim]UNDER = current bid is below max (you have room). OVER = bid already exceeds target.[/]")
 
 
 if __name__ == "__main__":

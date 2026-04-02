@@ -1,13 +1,75 @@
 """Goldin Auction Tracker — April 2026 lot data.
 
-Each lot includes current bid, Goldin tier, and card details.
+Each lot includes current bid, Goldin tier, card details, and an optional
+Goldin URL for live bid fetching. Bids can be updated in-place via
+update_bids_from_live() or manually by editing current_bid values.
+
 Goldin charges ~20% buyer's premium on top of hammer price.
 """
 
 GOLDIN_BUYER_PREMIUM = 0.20
 
+# Map lot numbers to Goldin item URLs for live scraping.
+# Populate these with the actual Goldin URLs for each lot.
+LOT_URLS: dict[int, str] = {
+    # Example: 1: "/item/shaq-nt-1-1-lasting-legacies-patch-auto-abc123",
+}
+
+
+def get_lot_url(lot_number: int) -> str | None:
+    """Get the Goldin URL for a lot number."""
+    return LOT_URLS.get(lot_number)
+
+
+def update_bid(lot_number: int, new_bid: float) -> bool:
+    """Update the current bid for a lot in-memory."""
+    for lot in LOTS:
+        if lot["lot"] == lot_number:
+            lot["current_bid"] = new_bid
+            return True
+    return False
+
+
+def update_bids_from_live(live_data: list[dict]) -> int:
+    """Bulk-update bids from live Goldin scrape results.
+
+    Args:
+        live_data: List of dicts from GoldinClient.get_live_bids()
+                   Each must have 'lot_number' and 'current_bid'.
+
+    Returns:
+        Number of lots updated.
+    """
+    updated = 0
+    for entry in live_data:
+        lot_num = entry.get("lot_number")
+        bid = entry.get("current_bid", 0)
+        if lot_num and bid > 0 and update_bid(lot_num, bid):
+            updated += 1
+    return updated
+
+
+def get_lot(lot_number: int) -> dict | None:
+    """Get a single lot by number."""
+    for lot in LOTS:
+        if lot["lot"] == lot_number:
+            return lot
+    return None
+
+
+def get_lots_by_tier(tier: str) -> list[dict]:
+    """Get all lots in a given tier (A, B, C, D)."""
+    return [lot for lot in LOTS if lot["tier"] == tier.upper()]
+
+
+def get_lots_by_player(player_name: str) -> list[dict]:
+    """Get all lots for a player (case-insensitive partial match)."""
+    name = player_name.lower()
+    return [lot for lot in LOTS if name in lot["player"].lower()]
+
+
 LOTS = [
-    # Tier A — Flagship lots
+    # ── Tier A — Flagship lots ──
     {"lot": 1, "card": "Shaq NT 1/1 Lasting Legacies Patch Auto", "tier": "A", "current_bid": 1588, "player": "Shaquille O'Neal", "brand": "National Treasures", "variation": "1/1 Patch Auto", "grade": None, "pop": 1},
     {"lot": 2, "card": "Curry 2009 Topps RC PSA 8", "tier": "A", "current_bid": 1051, "player": "Stephen Curry", "brand": "Topps", "variation": "Rookie", "grade": 8.0, "pop": None},
     {"lot": 3, "card": "Curry Kaleidoscopic Gold /10 PSA 10 Pop 4", "tier": "A", "current_bid": 1400, "player": "Stephen Curry", "brand": "Kaleidoscopic", "variation": "Gold /10", "grade": 10.0, "pop": 4},
@@ -16,7 +78,7 @@ LOTS = [
     {"lot": 6, "card": "Mantle/Ruth/Gehrig Flawless Triple /15 PSA 10 Pop 2", "tier": "A", "current_bid": 1601, "player": "Mantle/Ruth/Gehrig", "brand": "Flawless", "variation": "Triple /15", "grade": 10.0, "pop": 2},
     {"lot": 7, "card": "Curry NT Clutch Factor /25 PSA 9 Pop 4", "tier": "A", "current_bid": 803, "player": "Stephen Curry", "brand": "National Treasures", "variation": "Clutch Factor /25", "grade": 9.0, "pop": 4},
 
-    # Tier B — Strong secondary lots
+    # ── Tier B — Strong secondary lots ──
     {"lot": 8, "card": "Cooper Flagg Bowman Chrome U Auto PSA 10", "tier": "B", "current_bid": 910, "player": "Cooper Flagg", "brand": "Bowman Chrome U", "variation": "Auto", "grade": 10.0, "pop": None},
     {"lot": 9, "card": "Ant Edwards Optic Auto Choice PSA 10", "tier": "B", "current_bid": 775, "player": "Anthony Edwards", "brand": "Optic", "variation": "Auto Choice", "grade": 10.0, "pop": None},
     {"lot": 10, "card": "Ant Flawless Ruby Draft Gem /15", "tier": "B", "current_bid": 860, "player": "Anthony Edwards", "brand": "Flawless", "variation": "Ruby Draft Gem /15", "grade": None, "pop": 15},
@@ -37,7 +99,7 @@ LOTS = [
     {"lot": 25, "card": "Giannis Select Tie-Dye /25 BGS 9.5/10", "tier": "B", "current_bid": 340, "player": "Giannis Antetokounmpo", "brand": "Select", "variation": "Tie-Dye /25", "grade": 9.5, "pop": None},
     {"lot": 26, "card": "Curry One & One /25 BGS 9/10 Pop 3", "tier": "B", "current_bid": 160, "player": "Stephen Curry", "brand": "One & One", "variation": "/25", "grade": 9.0, "pop": 3},
 
-    # Tier C — Mid-range lots
+    # ── Tier C — Mid-range lots ──
     {"lot": 27, "card": "Luka NT Treasured Sigs /25 PSA 9", "tier": "C", "current_bid": 510, "player": "Luka Doncic", "brand": "National Treasures", "variation": "Treasured Sigs /25", "grade": 9.0, "pop": 25},
     {"lot": 28, "card": "Luka Immaculate Scorers Club /25 PSA 9", "tier": "C", "current_bid": 515, "player": "Luka Doncic", "brand": "Immaculate", "variation": "Scorers Club /25", "grade": 9.0, "pop": 25},
     {"lot": 29, "card": "Ant NT Private Signings PSA 9 Pop 4", "tier": "C", "current_bid": 211, "player": "Anthony Edwards", "brand": "National Treasures", "variation": "Private Signings", "grade": 9.0, "pop": 4},
@@ -68,7 +130,7 @@ LOTS = [
     {"lot": 54, "card": "Curry Prestige True Colors BGS 9", "tier": "C", "current_bid": 42, "player": "Stephen Curry", "brand": "Prestige", "variation": "True Colors", "grade": 9.0, "pop": None},
     {"lot": 55, "card": "Ray Allen Immaculate Ink Red /25 PSA 8", "tier": "C", "current_bid": 10, "player": "Ray Allen", "brand": "Immaculate", "variation": "Ink Red /25", "grade": 8.0, "pop": 25},
 
-    # Tier D — Value lots
+    # ── Tier D — Value lots ──
     {"lot": 56, "card": "Yao Crusade Green & Gold /25 PSA 10", "tier": "D", "current_bid": 34, "player": "Yao Ming", "brand": "Crusade", "variation": "Green & Gold /25", "grade": 10.0, "pop": 25},
     {"lot": 57, "card": "Yao Pristine Refractor BGS 9.5", "tier": "D", "current_bid": 16, "player": "Yao Ming", "brand": "Pristine", "variation": "Refractor", "grade": 9.5, "pop": None},
     {"lot": 58, "card": "Caitlin Clark VIP PSA 8", "tier": "D", "current_bid": 40, "player": "Caitlin Clark", "brand": "VIP", "variation": "", "grade": 8.0, "pop": None},

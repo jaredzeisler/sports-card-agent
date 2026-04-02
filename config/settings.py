@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # PSA
     psa_api_key: str = Field(default="", alias="PSA_API_KEY")
 
+    # Goldin
+    goldin_session_cookie: str = Field(default="", alias="GOLDIN_SESSION_COOKIE")
+
     # Anthropic
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
 

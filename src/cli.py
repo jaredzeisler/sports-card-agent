@@ -778,5 +778,45 @@ def goldin_refresh():
     console.print(table)
 
 
+@goldin.command("scan")
+@click.option("--category", default="Basketball Cards", help="Card category to scan")
+@click.option("--pages", default=5, type=int, help="Max pages to scrape")
+@click.option("--no-headless", is_flag=True, help="Show browser window")
+def goldin_scan(category, pages, no_headless):
+    """Scrape Goldin weekly auction for buy candidates (requires Playwright + Chromium)."""
+    try:
+        from src.api.goldin_browser import scrape_weekly_auction
+    except ImportError:
+        console.print("[red]Playwright not installed.[/]")
+        console.print("Run: pip install playwright && python -m playwright install chromium")
+        return
+
+    console.print(f"[dim]Scanning Goldin weekly auction: {category}, {pages} pages...[/]")
+    lots = scrape_weekly_auction(category=category, max_pages=pages, headless=not no_headless)
+
+    if not lots:
+        console.print("[yellow]No lots found. The page may have changed or Playwright needs chromium installed.[/]")
+        return
+
+    console.print(f"[green]Found {len(lots)} lots.[/]\n")
+
+    table = Table(title=f"Goldin Weekly — {category} ({len(lots)} lots)")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Card", style="cyan", max_width=50)
+    table.add_column("Bid", justify="right")
+    table.add_column("Bids", justify="right")
+
+    for i, lot in enumerate(lots, 1):
+        table.add_row(
+            str(i),
+            lot["title"][:50],
+            f"${lot['current_bid']:,.0f}" if lot["current_bid"] > 0 else "?",
+            str(lot.get("bid_count", "?")),
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]To analyze FMV deltas, paste lot names + bids into chat.[/]")
+
+
 if __name__ == "__main__":
     cli()

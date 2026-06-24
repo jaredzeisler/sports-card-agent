@@ -204,6 +204,66 @@ def parse_returns(path):
     return returns
 
 
+def parse_fanatics_collect(path):
+    items = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            title = row.get("title", "").strip()
+            if not title:
+                continue
+            sale_cents = int(row["sale_price_in_cents"]) if row.get("sale_price_in_cents") else 0
+            net_cents = int(row["seller_net_in_cents"]) if row.get("seller_net_in_cents") else 0
+            fee_pct = float(row["seller_fee_percentage"]) if row.get("seller_fee_percentage") else 0
+            status = row.get("payout_status", "").strip()
+            sale_date = row.get("sale_date", "")[:10]
+            cert = row.get("certification_number", "").strip()
+            items.append({
+                "title": title, "cert": cert,
+                "sale_price": sale_cents / 100, "net_proceeds": net_cents / 100,
+                "fee_pct": fee_pct, "status": status, "date": sale_date,
+            })
+    total_sale = sum(i["sale_price"] for i in items)
+    total_net = sum(i["net_proceeds"] for i in items)
+    return {"items": items, "total_sale": total_sale, "total_net": total_net}
+
+
+def parse_wheelhouse(path):
+    from openpyxl import load_workbook as lwb
+    wb = lwb(path, read_only=True, data_only=True)
+    items = []
+    for sheet_name in wb.sheetnames:
+        if sheet_name == "TOTALS":
+            continue
+        ws = wb[sheet_name]
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i == 0:
+                continue
+            if not row or row[0] is None:
+                continue
+            title = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+            hammer = float(row[2]) if len(row) > 2 and row[2] else 0
+            gross = float(row[4]) if len(row) > 4 and row[4] else 0
+            cgc_fee = float(row[5]) if len(row) > 5 and row[5] else 0
+            net = float(row[6]) if len(row) > 6 and row[6] else 0
+            status = str(row[7]) if len(row) > 7 and row[7] else ""
+            sale_date = str(row[8])[:10] if len(row) > 8 and row[8] else ""
+            if "TOTALS" in title or not title:
+                continue
+            if hammer == 0 and "Cancelled" in status:
+                continue
+            items.append({
+                "title": title, "hammer": hammer, "gross": gross,
+                "fee": cgc_fee or 0, "net": net,
+                "status": status, "date": sale_date, "auction": sheet_name,
+            })
+    wb.close()
+    total_net = sum(i["net"] for i in items)
+    total_hammer = sum(i["hammer"] for i in items)
+    total_gross = sum(i["gross"] for i in items)
+    return {"items": items, "total_net": total_net, "total_hammer": total_hammer, "total_gross": total_gross}
+
+
 # ── Build Excel ──
 
 def make_header(ws, headers, color="1F4E79"):
@@ -227,7 +287,7 @@ BORDER = Border(bottom=Side(style="thin", color="CCCCCC"))
 
 
 def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, vault_bank_txns=0,
-              goldin_balance=None):
+              goldin_balance=None, fanatics=None, wheelhouse=None):
     wb = Workbook()
 
     goldin_sold = goldin["sold"]
@@ -241,10 +301,20 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     if goldin_balance is None:
         goldin_balance = {"deposits": [], "withdrawals": [], "adjustments": [],
                           "total_proceeds": 0, "total_payouts": 0, "total_adjustments": 0}
+    if fanatics is None:
+        fanatics = {"items": [], "total_sale": 0, "total_net": 0}
+    if wheelhouse is None:
+        wheelhouse = {"items": [], "total_net": 0, "total_hammer": 0, "total_gross": 0}
+
     goldin_sale_proceeds = goldin_balance["total_proceeds"]
     goldin_fees = abs(goldin_balance["total_adjustments"])
     goldin_net_proceeds = goldin_sale_proceeds - goldin_fees
     goldin_sale_count = len(goldin_balance["deposits"])
+    wh_net = wheelhouse["total_net"]
+    wh_count = len(wheelhouse["items"])
+    fc_sale = fanatics["total_sale"]
+    fc_net = fanatics["total_net"]
+    fc_count = len(fanatics["items"])
 
     # Totals
     total_ebay_spent = sum(p["total"] for p in ebay_purchases)
@@ -257,7 +327,7 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     held_est = sum(v["psa_estimate"] for v in vault_held if v["psa_estimate"] > 0)
     listed_price = sum(v["listing_price"] for v in vault_listed)
     total_refunds = sum(r["refund_amount"] for r in returns)
-    total_all_revenue = total_vault_proceeds + goldin_sale_proceeds
+    total_all_revenue = total_vault_proceeds + goldin_sale_proceeds + wh_net
 
     # ── 1. P&L Summary ──
     ws = wb.active
@@ -296,9 +366,12 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     add_row(r, "Combined Purchases", len(ebay_purchases) + len(goldin_sold), False, False, False); r += 1
     add_row(r, "Total Capital Deployed", total_all_spent, False, True); r += 2
 
-    add_row(r, "SELLING (PSA Vault - Bank Deposits)", "", True); r += 1
-    add_row(r, "Sale Transactions", vault_bank_txns if vault_bank_txns else len(vault_sold), False, False, False); r += 1
-    add_row(r, "Total Deposited to Bank", total_vault_proceeds); r += 2
+    add_row(r, "SELLING (Fanatics Collect / PSA Vault)", "", True); r += 1
+    add_row(r, "Stripe Deposit Transactions", vault_bank_txns if vault_bank_txns else len(vault_sold), False, False, False); r += 1
+    add_row(r, "Total Deposited to Bank", total_vault_proceeds); r += 1
+    add_row(r, "Fanatics Buy Now Sales (detail)", fc_count, False, False, False); r += 1
+    add_row(r, "Fanatics Gross Sale Price", fc_sale); r += 1
+    add_row(r, "Fanatics Net (after fees)", fc_net); r += 2
 
     add_row(r, "SELLING (Goldin Consignment Sales)", "", True); r += 1
     add_row(r, "Goldin Sale Transactions", goldin_sale_count, False, False, False); r += 1
@@ -306,9 +379,15 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     add_row(r, "Goldin Fees (grading/adjustments)", -goldin_fees); r += 1
     add_row(r, "Net Goldin Proceeds", goldin_net_proceeds); r += 2
 
+    add_row(r, "SELLING (Wheelhouse Auctions)", "", True); r += 1
+    add_row(r, "Wheelhouse Lots Sold", wh_count, False, False, False); r += 1
+    add_row(r, "Total Hammer Price", wheelhouse["total_hammer"]); r += 1
+    add_row(r, "JZ Net Proceeds", wh_net); r += 2
+
     add_row(r, "TOTAL ALL REVENUE", "", True); r += 1
-    add_row(r, "PSA Vault Deposits", total_vault_proceeds); r += 1
+    add_row(r, "Fanatics/PSA Vault Deposits", total_vault_proceeds); r += 1
     add_row(r, "Goldin Net Proceeds", goldin_net_proceeds); r += 1
+    add_row(r, "Wheelhouse Net Proceeds", wh_net); r += 1
     add_row(r, "Combined Revenue", total_all_revenue, False, True); r += 2
 
     add_row(r, "RETURNS & REFUNDS", "", True); r += 1
@@ -318,7 +397,7 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     sold_cost = sum(v["my_cost"] for v in vault_sold if v["my_cost"] > 0)
     realized_pnl = total_all_revenue - sold_cost
     add_row(r, "REALIZED P&L", "", True); r += 1
-    add_row(r, "Total Revenue (Vault + Goldin)", total_all_revenue); r += 1
+    add_row(r, "Total Revenue (all platforms)", total_all_revenue); r += 1
     add_row(r, "Cost Basis of Sold Items", sold_cost); r += 1
     add_row(r, "Realized P&L", realized_pnl, False, True); r += 2
 
@@ -478,10 +557,46 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     ws7.freeze_panes = "A2"
     ws7.auto_filter.ref = f"A1:C{len(goldin_sales_sorted)+1}"
 
-    # ── 8. Top 50 All Purchases ──
-    ws8 = wb.create_sheet("Top 50 All Purchases")
-    ws8.sheet_properties.tabColor = "C00000"
-    make_header(ws8, ["Rank", "Platform", "Title", "Amount"], "C00000")
+    # ── 8. Fanatics Collect Sales ──
+    ws8 = wb.create_sheet("Fanatics Collect Sales")
+    ws8.sheet_properties.tabColor = "00A3E0"
+    make_header(ws8, ["Date", "Card", "Cert", "Sale Price", "Fee %", "Net Proceeds", "Status"], "00A3E0")
+    fc_sorted = sorted(fanatics["items"], key=lambda x: x["sale_price"], reverse=True)
+    for r, item in enumerate(fc_sorted, 2):
+        ws8.cell(row=r, column=1, value=item["date"])
+        ws8.cell(row=r, column=2, value=item["title"])
+        ws8.cell(row=r, column=3, value=item["cert"])
+        ws8.cell(row=r, column=4, value=item["sale_price"]).number_format = MONEY
+        ws8.cell(row=r, column=5, value=item["fee_pct"] / 100 if item["fee_pct"] else 0).number_format = PCT
+        ws8.cell(row=r, column=6, value=item["net_proceeds"]).number_format = MONEY
+        ws8.cell(row=r, column=7, value=item["status"])
+    for col, w in zip("ABCDEFG", [12, 80, 14, 12, 8, 12, 22]):
+        ws8.column_dimensions[col].width = w
+    ws8.freeze_panes = "A2"
+    ws8.auto_filter.ref = f"A1:G{len(fc_sorted)+1}"
+
+    # ── 9. Wheelhouse Sales ──
+    ws9 = wb.create_sheet("Wheelhouse Sales")
+    ws9.sheet_properties.tabColor = "2E75B6"
+    make_header(ws9, ["Auction", "Card", "Hammer", "JZ Gross", "CGC Fee", "JZ Net", "Status"], "2E75B6")
+    wh_sorted = sorted(wheelhouse["items"], key=lambda x: x["net"], reverse=True)
+    for r, item in enumerate(wh_sorted, 2):
+        ws9.cell(row=r, column=1, value=item["auction"])
+        ws9.cell(row=r, column=2, value=item["title"])
+        ws9.cell(row=r, column=3, value=item["hammer"]).number_format = MONEY
+        ws9.cell(row=r, column=4, value=item["gross"]).number_format = MONEY
+        ws9.cell(row=r, column=5, value=item["fee"]).number_format = MONEY
+        ws9.cell(row=r, column=6, value=item["net"]).number_format = MONEY
+        ws9.cell(row=r, column=7, value=item["status"])
+    for col, w in zip("ABCDEFG", [10, 80, 12, 12, 10, 12, 18]):
+        ws9.column_dimensions[col].width = w
+    ws9.freeze_panes = "A2"
+    ws9.auto_filter.ref = f"A1:G{len(wh_sorted)+1}"
+
+    # ── 10. Top 50 All Purchases ──
+    ws10 = wb.create_sheet("Top 50 All Purchases")
+    ws10.sheet_properties.tabColor = "C00000"
+    make_header(ws10, ["Rank", "Platform", "Title", "Amount"], "C00000")
     all_buys = []
     for p in ebay_purchases:
         all_buys.append({"platform": "eBay", "title": p["title"], "amount": p["total"]})
@@ -489,15 +604,15 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
         all_buys.append({"platform": "Goldin", "title": g["title"], "amount": g["price"]})
     all_buys.sort(key=lambda x: x["amount"], reverse=True)
     for r, b in enumerate(all_buys[:50], 2):
-        ws8.cell(row=r, column=1, value=r - 1)
-        ws8.cell(row=r, column=2, value=b["platform"])
-        ws8.cell(row=r, column=3, value=b["title"])
-        ws8.cell(row=r, column=4, value=b["amount"]).number_format = MONEY
-    ws8.column_dimensions["A"].width = 6
-    ws8.column_dimensions["B"].width = 10
-    ws8.column_dimensions["C"].width = 90
-    ws8.column_dimensions["D"].width = 14
-    ws8.freeze_panes = "A2"
+        ws10.cell(row=r, column=1, value=r - 1)
+        ws10.cell(row=r, column=2, value=b["platform"])
+        ws10.cell(row=r, column=3, value=b["title"])
+        ws10.cell(row=r, column=4, value=b["amount"]).number_format = MONEY
+    ws10.column_dimensions["A"].width = 6
+    ws10.column_dimensions["B"].width = 10
+    ws10.column_dimensions["C"].width = 90
+    ws10.column_dimensions["D"].width = 14
+    ws10.freeze_panes = "A2"
 
     OUT = "/home/user/sports-card-agent/Inventory/eBay_PnL.xlsx"
     wb.save(OUT)
@@ -511,6 +626,8 @@ if __name__ == "__main__":
     GOLDIN_XLSX = "/home/user/sports-card-agent/data/goldin_full_history.xlsx"
     BALANCE_CSV = "/home/user/sports-card-agent/data/psa_vault_balance_history.csv"
     GOLDIN_BAL_CSV = "/home/user/sports-card-agent/data/goldin_balance_transactions.csv"
+    FANATICS_CSV = "/home/user/sports-card-agent/data/fanatics_collect_sales.csv"
+    WHEELHOUSE_XLSX = "/home/user/sports-card-agent/data/wheelhouse_sales.xlsx"
 
     print("Parsing eBay purchases...")
     ebay = parse_ebay_purchases(PURCHASE_HTML)
@@ -553,6 +670,14 @@ if __name__ == "__main__":
     print(f"  ${goldin_bal['total_payouts']:,.2f} paid out to bank")
     print(f"  ${abs(goldin_bal['total_adjustments']):,.2f} in fees/adjustments")
 
+    print("Parsing Fanatics Collect sales...")
+    fc = parse_fanatics_collect(FANATICS_CSV)
+    print(f"  {len(fc['items'])} sales, ${fc['total_sale']:,.2f} gross, ${fc['total_net']:,.2f} net")
+
+    print("Parsing Wheelhouse auction sales...")
+    wh = parse_wheelhouse(WHEELHOUSE_XLSX)
+    print(f"  {len(wh['items'])} lots, ${wh['total_hammer']:,.2f} hammer, ${wh['total_net']:,.2f} net proceeds")
+
     print("Parsing returns...")
     returns = parse_returns(RETURNS_HTML)
     print(f"  {len(returns)} returns")
@@ -560,14 +685,14 @@ if __name__ == "__main__":
     print("\nBuilding complete P&L...")
     out = build_pnl(ebay, goldin, vault, returns,
                     vault_bank_total=total_vault_bank, vault_bank_txns=len(vault_payments),
-                    goldin_balance=goldin_bal)
+                    goldin_balance=goldin_bal, fanatics=fc, wheelhouse=wh)
 
     total_ebay = sum(p["total"] for p in ebay)
     total_goldin = sum(g["price"] for g in goldin["sold"])
     held_cost = sum(v["my_cost"] for v in vault_held if v["my_cost"] > 0)
     held_est = sum(v["psa_estimate"] for v in vault_held if v["psa_estimate"] > 0)
     pipeline = len(goldin["pending_auth"]) + len(goldin["pending_placement"]) + len(goldin["live"]) + len(goldin["upcoming"])
-    total_all_revenue = total_vault_bank + goldin_bal["total_proceeds"]
+    total_all_revenue = total_vault_bank + goldin_bal["total_proceeds"] + wh["total_net"]
 
     print(f"\n{'='*70}")
     print(f"  COMPLETE P&L ACROSS ALL PLATFORMS")
@@ -580,9 +705,11 @@ if __name__ == "__main__":
     print(f"    TOTAL DEPLOYED:       {len(ebay)+len(goldin['sold']):>5,} cards   ${total_ebay+total_goldin:>12,.2f}")
     print(f"")
     print(f"  CAPITAL OUT (ALL PLATFORMS)")
-    print(f"    PSA Vault Sales:      {len(vault_payments):>5,} txns    ${total_vault_bank:>12,.2f}")
+    print(f"    Fanatics/PSA Vault:   {len(vault_payments):>5,} txns    ${total_vault_bank:>12,.2f}")
+    print(f"      (detail: {len(fc['items'])} Buy Now items, ${fc['total_sale']:,.0f} gross / ${fc['total_net']:,.0f} net)")
     print(f"    Goldin Consignment:   {len(goldin_bal['deposits']):>5,} sales   ${goldin_bal['total_proceeds']:>12,.2f}")
     print(f"    Goldin Fees:                          ${-abs(goldin_bal['total_adjustments']):>12,.2f}")
+    print(f"    Wheelhouse Auctions:  {len(wh['items']):>5,} lots    ${wh['total_net']:>12,.2f}")
     print(f"    ─────────────────────────────────────────────────")
     print(f"    TOTAL REVENUE:                        ${total_all_revenue:>12,.2f}")
     print(f"")
@@ -598,7 +725,7 @@ if __name__ == "__main__":
     ebay_listed = [v for v in vault if v['listing_status'] == 'Fixed Price' and v['sold_price'] == 0]
     print(f"    eBay Listed:          {len(ebay_listed):>5,} cards   ${sum(v['listing_price'] for v in ebay_listed):>12,.2f}")
     print(f"")
-    print(f"  MONTHLY PSA VAULT SALES")
+    print(f"  MONTHLY FANATICS/PSA VAULT SALES")
     for m in sorted(monthly_vault.keys()):
         d = monthly_vault[m]
         print(f"    {m}:  {d['count']:>3} sales   ${d['gross']:>10,.2f}")
@@ -616,6 +743,19 @@ if __name__ == "__main__":
         print(f"    {m}:  {d['count']:>3} sales   ${d['gross']:>10,.2f}")
     print(f"    ─────────────────────────────────")
     print(f"    TOTAL:   {len(goldin_bal['deposits']):>3} sales   ${goldin_bal['total_proceeds']:>10,.2f}")
+    print(f"")
+
+    monthly_wh = defaultdict(lambda: {"net": 0, "count": 0})
+    for item in wh["items"]:
+        m = item["date"][:7] if item["date"] and len(item["date"]) >= 7 else "Unknown"
+        monthly_wh[m]["net"] += item["net"]
+        monthly_wh[m]["count"] += 1
+    print(f"  MONTHLY WHEELHOUSE AUCTION SALES")
+    for m in sorted(monthly_wh.keys()):
+        d = monthly_wh[m]
+        print(f"    {m}:  {d['count']:>3} lots    ${d['net']:>10,.2f}")
+    print(f"    ─────────────────────────────────")
+    print(f"    TOTAL:   {len(wh['items']):>3} lots    ${wh['total_net']:>10,.2f}")
 
     print(f"{'='*70}")
     print(f"\nSaved to: {out}")

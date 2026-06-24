@@ -1,4 +1,4 @@
-"""Build complete P&L across eBay purchases, PSA Vault sales, and Goldin consignments."""
+"""Build complete P&L across eBay purchases, PSA Vault sales, and Goldin consignment sales."""
 
 import csv
 import re
@@ -162,6 +162,33 @@ def parse_vault(path):
 
 # ── Parse eBay returns ──
 
+def parse_goldin_balance(path):
+    deposits = []
+    withdrawals = []
+    adjustments = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            op = row["operation_type"].strip()
+            amt = float(row["amount_changed"])
+            desc = row.get("description", "").strip()
+            ts = row["timestamp"][:7]
+            if op == "deposit":
+                deposits.append({"amount": amt, "description": desc, "month": ts})
+            elif op == "withdrawal":
+                withdrawals.append({"amount": amt, "description": desc, "month": ts})
+            elif op == "adjustment":
+                adjustments.append({"amount": amt, "description": desc, "month": ts})
+    return {
+        "deposits": deposits,
+        "withdrawals": withdrawals,
+        "adjustments": adjustments,
+        "total_proceeds": sum(d["amount"] for d in deposits),
+        "total_payouts": abs(sum(w["amount"] for w in withdrawals)),
+        "total_adjustments": sum(a["amount"] for a in adjustments),
+    }
+
+
 def parse_returns(path):
     with open(path, "r", encoding="utf-8") as f:
         soup = BeautifulSoup(f, "lxml")
@@ -199,7 +226,8 @@ YELLOW_BG = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="sol
 BORDER = Border(bottom=Side(style="thin", color="CCCCCC"))
 
 
-def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, vault_bank_txns=0):
+def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, vault_bank_txns=0,
+              goldin_balance=None):
     wb = Workbook()
 
     goldin_sold = goldin["sold"]
@@ -209,6 +237,14 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     vault_sold = [v for v in vault_items if v["sold_price"] > 0 or v["sold_proceeds"] > 0]
     vault_held = [v for v in vault_items if v["vault_status"] == "Vaulted" and v["sold_price"] == 0]
     vault_listed = [v for v in vault_items if v["listing_status"] == "Fixed Price" and v["sold_price"] == 0]
+
+    if goldin_balance is None:
+        goldin_balance = {"deposits": [], "withdrawals": [], "adjustments": [],
+                          "total_proceeds": 0, "total_payouts": 0, "total_adjustments": 0}
+    goldin_sale_proceeds = goldin_balance["total_proceeds"]
+    goldin_fees = abs(goldin_balance["total_adjustments"])
+    goldin_net_proceeds = goldin_sale_proceeds - goldin_fees
+    goldin_sale_count = len(goldin_balance["deposits"])
 
     # Totals
     total_ebay_spent = sum(p["total"] for p in ebay_purchases)
@@ -221,6 +257,7 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     held_est = sum(v["psa_estimate"] for v in vault_held if v["psa_estimate"] > 0)
     listed_price = sum(v["listing_price"] for v in vault_listed)
     total_refunds = sum(r["refund_amount"] for r in returns)
+    total_all_revenue = total_vault_proceeds + goldin_sale_proceeds
 
     # ── 1. P&L Summary ──
     ws = wb.active
@@ -263,14 +300,25 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     add_row(r, "Sale Transactions", vault_bank_txns if vault_bank_txns else len(vault_sold), False, False, False); r += 1
     add_row(r, "Total Deposited to Bank", total_vault_proceeds); r += 2
 
+    add_row(r, "SELLING (Goldin Consignment Sales)", "", True); r += 1
+    add_row(r, "Goldin Sale Transactions", goldin_sale_count, False, False, False); r += 1
+    add_row(r, "Gross Sale Proceeds", goldin_sale_proceeds); r += 1
+    add_row(r, "Goldin Fees (grading/adjustments)", -goldin_fees); r += 1
+    add_row(r, "Net Goldin Proceeds", goldin_net_proceeds); r += 2
+
+    add_row(r, "TOTAL ALL REVENUE", "", True); r += 1
+    add_row(r, "PSA Vault Deposits", total_vault_proceeds); r += 1
+    add_row(r, "Goldin Net Proceeds", goldin_net_proceeds); r += 1
+    add_row(r, "Combined Revenue", total_all_revenue, False, True); r += 2
+
     add_row(r, "RETURNS & REFUNDS", "", True); r += 1
     add_row(r, "Total Returns", len(returns), False, False, False); r += 1
     add_row(r, "Total Refunded", total_refunds); r += 2
 
     sold_cost = sum(v["my_cost"] for v in vault_sold if v["my_cost"] > 0)
-    realized_pnl = total_vault_proceeds - sold_cost
+    realized_pnl = total_all_revenue - sold_cost
     add_row(r, "REALIZED P&L", "", True); r += 1
-    add_row(r, "Sale Proceeds (net)", total_vault_proceeds); r += 1
+    add_row(r, "Total Revenue (Vault + Goldin)", total_all_revenue); r += 1
     add_row(r, "Cost Basis of Sold Items", sold_cost); r += 1
     add_row(r, "Realized P&L", realized_pnl, False, True); r += 2
 
@@ -294,8 +342,8 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
 
     add_row(r, "OVERALL POSITION", "", True); r += 1
     add_row(r, "Total Capital In", total_all_spent); r += 1
-    add_row(r, "Total Cash Out (proceeds)", total_vault_proceeds); r += 1
-    add_row(r, "Cash Position (Out - In)", total_vault_proceeds - total_all_spent, False, True); r += 1
+    add_row(r, "Total Cash Out (all platforms)", total_all_revenue); r += 1
+    add_row(r, "Cash Position (Out - In)", total_all_revenue - total_all_spent, False, True); r += 1
     add_row(r, "Held Inventory (PSA Est)", held_est); r += 1
     add_row(r, "Pipeline Cards (Goldin)", total_pipeline, False, False, False); r += 1
 
@@ -412,10 +460,28 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
     ws6.freeze_panes = "A2"
     ws6.auto_filter.ref = f"A1:B{len(pipeline)+1}"
 
-    # ── 7. Top 50 All Purchases ──
-    ws7 = wb.create_sheet("Top 50 All Purchases")
-    ws7.sheet_properties.tabColor = "C00000"
-    make_header(ws7, ["Rank", "Platform", "Title", "Amount"], "C00000")
+    # ── 7. Goldin Sales ──
+    ws7 = wb.create_sheet("Goldin Sales")
+    ws7.sheet_properties.tabColor = "E97132"
+    make_header(ws7, ["Date", "Card", "Proceeds"], "E97132")
+    goldin_sales_sorted = sorted(goldin_balance["deposits"], key=lambda x: x["amount"], reverse=True)
+    for r, d in enumerate(goldin_sales_sorted, 2):
+        desc = d["description"]
+        if desc.startswith("Proceeds from "):
+            desc = desc[len("Proceeds from "):]
+        ws7.cell(row=r, column=1, value=d["month"])
+        ws7.cell(row=r, column=2, value=desc)
+        ws7.cell(row=r, column=3, value=d["amount"]).number_format = MONEY
+    ws7.column_dimensions["A"].width = 12
+    ws7.column_dimensions["B"].width = 100
+    ws7.column_dimensions["C"].width = 14
+    ws7.freeze_panes = "A2"
+    ws7.auto_filter.ref = f"A1:C{len(goldin_sales_sorted)+1}"
+
+    # ── 8. Top 50 All Purchases ──
+    ws8 = wb.create_sheet("Top 50 All Purchases")
+    ws8.sheet_properties.tabColor = "C00000"
+    make_header(ws8, ["Rank", "Platform", "Title", "Amount"], "C00000")
     all_buys = []
     for p in ebay_purchases:
         all_buys.append({"platform": "eBay", "title": p["title"], "amount": p["total"]})
@@ -423,15 +489,15 @@ def build_pnl(ebay_purchases, goldin, vault_items, returns, vault_bank_total=0, 
         all_buys.append({"platform": "Goldin", "title": g["title"], "amount": g["price"]})
     all_buys.sort(key=lambda x: x["amount"], reverse=True)
     for r, b in enumerate(all_buys[:50], 2):
-        ws7.cell(row=r, column=1, value=r - 1)
-        ws7.cell(row=r, column=2, value=b["platform"])
-        ws7.cell(row=r, column=3, value=b["title"])
-        ws7.cell(row=r, column=4, value=b["amount"]).number_format = MONEY
-    ws7.column_dimensions["A"].width = 6
-    ws7.column_dimensions["B"].width = 10
-    ws7.column_dimensions["C"].width = 90
-    ws7.column_dimensions["D"].width = 14
-    ws7.freeze_panes = "A2"
+        ws8.cell(row=r, column=1, value=r - 1)
+        ws8.cell(row=r, column=2, value=b["platform"])
+        ws8.cell(row=r, column=3, value=b["title"])
+        ws8.cell(row=r, column=4, value=b["amount"]).number_format = MONEY
+    ws8.column_dimensions["A"].width = 6
+    ws8.column_dimensions["B"].width = 10
+    ws8.column_dimensions["C"].width = 90
+    ws8.column_dimensions["D"].width = 14
+    ws8.freeze_panes = "A2"
 
     OUT = "/home/user/sports-card-agent/Inventory/eBay_PnL.xlsx"
     wb.save(OUT)
@@ -444,6 +510,7 @@ if __name__ == "__main__":
     VAULT_CSV = "/home/user/sports-card-agent/data/psa_vault_raw.csv"
     GOLDIN_XLSX = "/home/user/sports-card-agent/data/goldin_full_history.xlsx"
     BALANCE_CSV = "/home/user/sports-card-agent/data/psa_vault_balance_history.csv"
+    GOLDIN_BAL_CSV = "/home/user/sports-card-agent/data/goldin_balance_transactions.csv"
 
     print("Parsing eBay purchases...")
     ebay = parse_ebay_purchases(PURCHASE_HTML)
@@ -480,48 +547,75 @@ if __name__ == "__main__":
     total_vault_bank = sum(p["amount"] for p in vault_payments)
     print(f"  {len(vault_payments)} sale payments, ${total_vault_bank:,.2f} deposited to bank")
 
+    print("Parsing Goldin balance transactions (consignment sales)...")
+    goldin_bal = parse_goldin_balance(GOLDIN_BAL_CSV)
+    print(f"  {len(goldin_bal['deposits'])} sales, ${goldin_bal['total_proceeds']:,.2f} gross proceeds")
+    print(f"  ${goldin_bal['total_payouts']:,.2f} paid out to bank")
+    print(f"  ${abs(goldin_bal['total_adjustments']):,.2f} in fees/adjustments")
+
     print("Parsing returns...")
     returns = parse_returns(RETURNS_HTML)
     print(f"  {len(returns)} returns")
 
     print("\nBuilding complete P&L...")
-    out = build_pnl(ebay, goldin, vault, returns, vault_bank_total=total_vault_bank, vault_bank_txns=len(vault_payments))
+    out = build_pnl(ebay, goldin, vault, returns,
+                    vault_bank_total=total_vault_bank, vault_bank_txns=len(vault_payments),
+                    goldin_balance=goldin_bal)
 
     total_ebay = sum(p["total"] for p in ebay)
     total_goldin = sum(g["price"] for g in goldin["sold"])
     held_cost = sum(v["my_cost"] for v in vault_held if v["my_cost"] > 0)
     held_est = sum(v["psa_estimate"] for v in vault_held if v["psa_estimate"] > 0)
     pipeline = len(goldin["pending_auth"]) + len(goldin["pending_placement"]) + len(goldin["live"]) + len(goldin["upcoming"])
+    total_all_revenue = total_vault_bank + goldin_bal["total_proceeds"]
 
-    print(f"\n{'='*65}")
+    print(f"\n{'='*70}")
     print(f"  COMPLETE P&L ACROSS ALL PLATFORMS")
-    print(f"{'='*65}")
+    print(f"{'='*70}")
     print(f"")
     print(f"  CAPITAL IN (PURCHASES)")
     print(f"    eBay Purchases:       {len(ebay):>5,} cards   ${total_ebay:>12,.2f}")
     print(f"    Goldin Purchases:     {len(goldin['sold']):>5,} cards   ${total_goldin:>12,.2f}")
-    print(f"    ─────────────────────────────────────────────")
+    print(f"    ─────────────────────────────────────────────────")
     print(f"    TOTAL DEPLOYED:       {len(ebay)+len(goldin['sold']):>5,} cards   ${total_ebay+total_goldin:>12,.2f}")
     print(f"")
-    print(f"  CAPITAL OUT (ACTUAL BANK DEPOSITS)")
+    print(f"  CAPITAL OUT (ALL PLATFORMS)")
     print(f"    PSA Vault Sales:      {len(vault_payments):>5,} txns    ${total_vault_bank:>12,.2f}")
+    print(f"    Goldin Consignment:   {len(goldin_bal['deposits']):>5,} sales   ${goldin_bal['total_proceeds']:>12,.2f}")
+    print(f"    Goldin Fees:                          ${-abs(goldin_bal['total_adjustments']):>12,.2f}")
+    print(f"    ─────────────────────────────────────────────────")
+    print(f"    TOTAL REVENUE:                        ${total_all_revenue:>12,.2f}")
     print(f"")
     print(f"  CASH FLOW")
-    cash = total_vault_bank - total_ebay - total_goldin
-    print(f"    Total Out - Total In:                ${cash:>12,.2f}")
+    cash = total_all_revenue - total_ebay - total_goldin
+    print(f"    Total Out - Total In:                 ${cash:>12,.2f}")
     print(f"")
     print(f"  CURRENT ASSETS")
     print(f"    Vault Inventory:      {len(vault_held):>5,} cards")
-    print(f"      Cost Basis:                        ${held_cost:>12,.2f}")
-    print(f"      PSA Estimate:                      ${held_est:>12,.2f}")
+    print(f"      Cost Basis:                         ${held_cost:>12,.2f}")
+    print(f"      PSA Estimate:                       ${held_est:>12,.2f}")
     print(f"    Goldin Pipeline:      {pipeline:>5,} cards   (pending/live/upcoming)")
-    print(f"    eBay Listed:          {len([v for v in vault if v['listing_status']=='Fixed Price' and v['sold_price']==0]):>5,} cards   ${sum(v['listing_price'] for v in vault if v['listing_status']=='Fixed Price' and v['sold_price']==0):>12,.2f}")
+    ebay_listed = [v for v in vault if v['listing_status'] == 'Fixed Price' and v['sold_price'] == 0]
+    print(f"    eBay Listed:          {len(ebay_listed):>5,} cards   ${sum(v['listing_price'] for v in ebay_listed):>12,.2f}")
     print(f"")
-    print(f"  MONTHLY VAULT SALES (ACTUAL DEPOSITS)")
+    print(f"  MONTHLY PSA VAULT SALES")
     for m in sorted(monthly_vault.keys()):
         d = monthly_vault[m]
         print(f"    {m}:  {d['count']:>3} sales   ${d['gross']:>10,.2f}")
-    print(f"    ─────────────────────────────────────")
+    print(f"    ─────────────────────────────────")
     print(f"    TOTAL:   {len(vault_payments):>3} sales   ${total_vault_bank:>10,.2f}")
-    print(f"{'='*65}")
+    print(f"")
+
+    monthly_goldin = defaultdict(lambda: {"gross": 0, "count": 0})
+    for d in goldin_bal["deposits"]:
+        monthly_goldin[d["month"]]["gross"] += d["amount"]
+        monthly_goldin[d["month"]]["count"] += 1
+    print(f"  MONTHLY GOLDIN CONSIGNMENT SALES")
+    for m in sorted(monthly_goldin.keys()):
+        d = monthly_goldin[m]
+        print(f"    {m}:  {d['count']:>3} sales   ${d['gross']:>10,.2f}")
+    print(f"    ─────────────────────────────────")
+    print(f"    TOTAL:   {len(goldin_bal['deposits']):>3} sales   ${goldin_bal['total_proceeds']:>10,.2f}")
+
+    print(f"{'='*70}")
     print(f"\nSaved to: {out}")

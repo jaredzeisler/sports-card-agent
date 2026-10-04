@@ -13,3 +13,10 @@ htmlcov/
 *.swo
 .venv/
 venv/
+
+# credentials - never commit
+secrets/
+*-service-account.json
+*credentials*.json
+*client_secret*.json
+token.json

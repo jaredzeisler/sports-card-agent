@@ -584,6 +584,9 @@ def _appr_read(sheets, tab):
     return hdr, rows
 
 
+UNCHANGED = []
+
+
 def _appr_apply(drive, sheets, ops, commit):
     """Returns (applied, refused, backup_path)."""
     tab = _appr_tab(sheets)
@@ -626,6 +629,8 @@ def _appr_apply(drive, sheets, ops, commit):
                 refused.append((op, "column %r is identity - not writable" % f)); continue
             ci = col[f]
             before = row[ci] if len(row) > ci else ""
+            if str(before) == str(val):
+                UNCHANGED.append("%s  %s%d  %s (already correct)" % (rid, _a1(ci), rn, f)); continue
             cell = "'%s'!%s%d" % (tab, _a1(ci), rn)
             writes.append({"range": cell, "values": [[val]], "_rid": rid, "_field": f,
                            "_before": before, "_row": rn, "_cert": cert})
@@ -742,6 +747,9 @@ def cmd_apply(ops_path, commit):
                 before = ws.cell(row=r, column=c).value
                 if isinstance(before, str) and before.startswith("="):
                     refused.append((op, "%s row %d is a formula - not overwritten" % (field, r))); continue
+                if before == val or (isinstance(val, (int, float)) and isinstance(before, (int, float))
+                                     and float(before) == float(val)):
+                    UNCHANGED.append("%s  row %d  %s (already correct)" % (rid, r, field)); continue
                 ws.cell(row=r, column=c).value = val
                 applied.append("%s  row %d  %-18s %r -> %r" % (rid, r, field, before, val))
         print("\n--- %s: %s (%d) ---" % (SELL_NAME, "WROTE TO SHEET" if commit and applied else "WOULD WRITE",
@@ -775,8 +783,161 @@ def cmd_apply(ops_path, commit):
                 print("Pre-write backup:", backup); exit_bad = 1
         elif applied:
             print("DRY RUN - nothing uploaded. Re-run with --commit.")
+    if UNCHANGED:
+        print("\n--- UNCHANGED (%d) - already match, nothing written ---" % len(UNCHANGED))
+        for u in UNCHANGED:
+            print("  ", u)
     if exit_bad:
         sys.exit(1)
+
+
+# ---------------------------------------------------------------- fill-formulas
+FORMULA_COLS = ("Est. hammer", "Hammer vs CL", "Net gain at Ask (after 6% fee)")
+
+
+def cmd_fill_formulas(commit):
+    """Copy the formula from the nearest row above into EMPTY formula cells on card rows.
+    Hand-typed values (overrides) and the hard-lock cert row are never touched."""
+    import openpyxl
+    from openpyxl.formula.translate import Translator
+    drive, _ = services()
+    backup = _pull_and_backup(drive)
+    wb = openpyxl.load_workbook(MASTER)
+    ws = wb["Sell Sheet"]
+    last, anchor = _layout_report(ws)
+    if anchor is None:
+        sys.exit("Refusing: summary anchor not found.")
+    h = _headers(ws)
+    fills, skipped = [], []
+    for name in FORMULA_COLS:
+        col = _col(h, name)
+        if not col:
+            skipped.append((name, "-", "column not found")); continue
+        src = None
+        for r in range(FIRST_DATA_ROW, last + 1):
+            v = ws.cell(row=r, column=col).value
+            if isinstance(v, str) and v.startswith("="):
+                src = (r, v); continue
+            rid = ws.cell(row=r, column=h["Row ID"]).value
+            if not rid:
+                continue
+            if norm_cert(ws.cell(row=r, column=h["Cert"]).value) == HARD_LOCK_NORM:
+                skipped.append((name, r, "hard-lock cert row")); continue
+            if v not in (None, ""):
+                skipped.append((name, r, "hand-typed value %r kept" % (v,))); continue
+            if src is None:
+                skipped.append((name, r, "no formula above to copy")); continue
+            letter = openpyxl.utils.get_column_letter(col)
+            newf = Translator(src[1], origin="%s%d" % (letter, src[0])).translate_formula("%s%d" % (letter, r))
+            fills.append((name, r, letter, newf))
+    print("\n--- %s (%d cells) ---" % ("WROTE TO SHEET" if commit else "WOULD FILL", len(fills)))
+    for name, r, letter, f in fills[:8]:
+        print("  %s%d  %-30s None -> %s" % (letter, r, name, f))
+    if len(fills) > 8:
+        print("  ... and %d more of the same pattern" % (len(fills) - 8))
+    for name, r, why in skipped:
+        print("  SKIPPED  %s row %s: %s" % (name, r, why))
+    if not fills:
+        print("Nothing to fill."); return
+    if not commit:
+        print("\nDRY RUN - nothing uploaded. Re-run with --commit."); return
+    for name, r, letter, f in fills:
+        ws["%s%d" % (letter, r)].value = f
+    _upload_sell(drive, wb)
+    chk = os.path.join(WORK_DIR, "master_verify.xlsx")
+    _download_xlsx(drive, SELL_ID, chk)
+    w2 = openpyxl.load_workbook(chk)["Sell Sheet"]
+    bad = [(n, r) for n, r, l, f in fills if w2["%s%d" % (l, r)].value != f]
+    print("post-write verification:", "ALL GOOD - %d formulas re-read and matched" % len(fills)
+          if not bad else "%d MISMATCH(ES): %s" % (len(bad), bad[:5]))
+    if bad:
+        print("Pre-write backup:", backup); sys.exit(1)
+
+
+# ---------------------------------------------------------------- rollback
+def _list_backups():
+    if not os.path.isdir(BACKUP_DIR):
+        return []
+    return sorted(f for f in os.listdir(BACKUP_DIR) if f.endswith(".xlsx"))
+
+
+def _bk_val(v):
+    """Backup xlsx value -> the text the live sheet shows (no 850.0, no 00:00:00)."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime.datetime):
+        return v.strftime("%Y-%m-%d") if (v.hour, v.minute, v.second) == (0, 0, 0) else str(v)
+    if isinstance(v, datetime.date):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v)
+
+
+def cmd_rollback(backup, commit):
+    """No argument: list backups. With a backup file name: restore it.
+    Sell Sheet -> whole file re-uploaded to the SAME file ID.
+    Approvals  -> only cells that differ in editable columns are put back."""
+    import openpyxl
+    names = _list_backups()
+    if not backup:
+        print("Backups in %s (newest last):" % BACKUP_DIR)
+        for n in names[-25:]:
+            print("  ", n)
+        print("\nRestore with: python tools/card_sheet_writer.py rollback \"<file name>\" [--commit]")
+        return
+    path = backup if os.path.isabs(backup) else os.path.join(BACKUP_DIR, backup)
+    if not os.path.exists(path):
+        sys.exit("Backup not found: %s" % path)
+    drive, sheets = services()
+    base = os.path.basename(path)
+    print("signed in as:", _whoami(drive), "|", "COMMIT" if commit else "DRY RUN", "| restoring from", base)
+    if base.startswith(APPROVALS_NAME):
+        wb = openpyxl.load_workbook(path, data_only=True)
+        wsb = wb.worksheets[0]
+        tab = _appr_tab(sheets)
+        hdr, rows = _appr_read(sheets, tab)
+        col = {x: i for i, x in enumerate(hdr)}
+        brows = {}
+        for r in wsb.iter_rows(min_row=APPR_HEADER_ROW + 1, values_only=True):
+            if r and r[0]:
+                brows[str(r[0]).strip()] = [_bk_val(v) for v in r]
+        writes, shown = [], []
+        for i, r in enumerate(rows[APPR_HEADER_ROW:], start=APPR_HEADER_ROW + 1):
+            rid = (r[0] if r else "").strip()
+            if rid not in brows:
+                continue
+            for f, ci in col.items():
+                if f in APPR_PROTECTED:
+                    continue
+                cur = r[ci] if len(r) > ci else ""
+                old = brows[rid][ci] if len(brows[rid]) > ci else ""
+                if str(cur) != str(old):
+                    writes.append({"range": "'%s'!%s%d" % (tab, _a1(ci), i), "values": [[old]]})
+                    shown.append("%s  %s%d  %-14s %r -> %r" % (rid, _a1(ci), i, f, cur, old))
+        print("\n--- %s: %s (%d cells) ---" % (APPROVALS_NAME, "RESTORED" if commit else "WOULD RESTORE", len(shown)))
+        for x in shown[:30]:
+            print("  ", x)
+        if not writes:
+            print("Live sheet already matches that backup."); return
+        if not commit:
+            print("\nDRY RUN - nothing written. Re-run with --commit."); return
+        pre = _unique(os.path.join(BACKUP_DIR, "%s %s PRE-ROLLBACK backup.xlsx" % (APPROVALS_NAME, _stamp())))
+        _export_sheet_xlsx(drive, APPROVALS_ID, pre); _drive_backup(drive, pre)
+        sheets.spreadsheets().values().batchUpdate(
+            spreadsheetId=APPROVALS_ID, body={"valueInputOption": "RAW", "data": writes}).execute()
+        print("restored %d cells. Undo copy: %s" % (len(writes), os.path.basename(pre)))
+    elif base.startswith(SELL_NAME):
+        print("Sell Sheet rollback replaces the WHOLE file with that backup (same file ID).")
+        if not commit:
+            print("DRY RUN - nothing uploaded. Re-run with --commit."); return
+        from googleapiclient.http import MediaFileUpload
+        pre = _unique(os.path.join(BACKUP_DIR, "%s %s PRE-ROLLBACK backup.xlsx" % (SELL_NAME, _stamp())))
+        _download_xlsx(drive, SELL_ID, pre); _drive_backup(drive, pre)
+        drive.files().update(fileId=SELL_ID, media_body=MediaFileUpload(path, mimetype=XLSX_MIME, resumable=True)).execute()
+        print("restored Sell Sheet from %s. Undo copy: %s" % (base, os.path.basename(pre)))
+    else:
+        sys.exit("Can't tell which file that backup belongs to (name must start with the sheet name).")
 
 
 def main():
@@ -787,11 +948,15 @@ def main():
     sub.add_parser("verify"); sub.add_parser("pull"); sub.add_parser("publish-cloud")
     sub.add_parser("audit")
     fx = sub.add_parser("fix-ranges"); fx.add_argument("--commit", action="store_true")
+    ff = sub.add_parser("fill-formulas"); ff.add_argument("--commit", action="store_true")
+    rb = sub.add_parser("rollback"); rb.add_argument("backup", nargs="?"); rb.add_argument("--commit", action="store_true")
     ap2 = sub.add_parser("apply"); ap2.add_argument("ops"); ap2.add_argument("--commit", action="store_true")
     args = ap.parse_args()
     {"auth": lambda: cmd_auth(args.manual, args.url, args.finish), "verify": cmd_verify, "pull": cmd_pull, "publish-cloud": cmd_publish_cloud,
      "audit": cmd_audit,
      "fix-ranges": lambda: cmd_fix_ranges(args.commit),
+     "fill-formulas": lambda: cmd_fill_formulas(args.commit),
+     "rollback": lambda: cmd_rollback(args.backup, args.commit),
      "apply": lambda: cmd_apply(args.ops, args.commit)}[args.cmd]()
 
 

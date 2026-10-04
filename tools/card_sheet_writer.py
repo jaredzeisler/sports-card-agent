@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 SECRETS = os.path.join(REPO, "secrets")
 CLIENT_PATH = os.path.join(SECRETS, "client_secret.json")
-TOKEN_PATH = os.path.join(SECRETS, "token.json")
+TOKEN_PATH = os.environ.get("CARD_TOKEN_PATH", os.path.join(SECRETS, "token.json"))
 WORK_DIR = os.path.join(REPO, "Inventory", "sheet-working")
 BACKUP_DIR = os.path.join(REPO, "Inventory", "sheet-backups")
 MASTER = os.path.join(WORK_DIR, "master.xlsx")
@@ -219,6 +219,64 @@ def _unique(path):
     return "%s (%d)%s" % (base, n, ext)
 
 
+BACKUP_FOLDER_NAME = "Card Desk Sheet Backups"
+CLOUD_SCRIPT_NAME = "card_sheet_writer.py (cloud copy)"
+CLOUD_TOKEN_NAME = "Card Desk Writer - credentials (private)"
+OWNER_GMAIL = "jared.zeisler@gmail.com"
+
+
+def _backup_folder_id(drive):
+    q = ("name = '%s' and mimeType = 'application/vnd.google-apps.folder' and trashed = false and 'me' in owners"
+         % BACKUP_FOLDER_NAME)
+    r = drive.files().list(q=q, fields="files(id)", pageSize=1).execute().get("files", [])
+    if r:
+        return r[0]["id"]
+    f = drive.files().create(body={"name": BACKUP_FOLDER_NAME,
+                                   "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute()
+    return f["id"]
+
+
+def _drive_backup(drive, path):
+    """Copy a local backup into the Drive backup folder (survives a cloud sandbox)."""
+    from googleapiclient.http import MediaFileUpload
+    try:
+        fid = _backup_folder_id(drive)
+        media = MediaFileUpload(path, mimetype=XLSX_MIME)
+        drive.files().create(body={"name": os.path.basename(path), "parents": [fid]},
+                             media_body=media, fields="id").execute()
+        print("backup also saved to Drive folder %r" % BACKUP_FOLDER_NAME)
+    except Exception as e:
+        if os.environ.get("CARD_REQUIRE_DRIVE_BACKUP") == "1":
+            sys.exit("Drive backup FAILED (%s) and a Drive backup is required here. Nothing written." % e)
+        print("note: Drive backup copy failed (%s); local backup still exists" % e)
+
+
+def cmd_publish_cloud():
+    """Upload the script and sign-in file to the workspace Drive and share read-only to the gmail
+    account, so cloud tasks (which read Drive as gmail) can fetch them. Re-run after any script change."""
+    from googleapiclient.http import MediaFileUpload
+    drive, _ = services()
+    ids = {}
+    for name, path, mime in ((CLOUD_SCRIPT_NAME, os.path.abspath(__file__), "text/plain"),
+                             (CLOUD_TOKEN_NAME, TOKEN_PATH, "application/json")):
+        q = "name = '%s' and trashed = false and 'me' in owners" % name
+        found = drive.files().list(q=q, fields="files(id)", pageSize=1).execute().get("files", [])
+        media = MediaFileUpload(path, mimetype=mime)
+        if found:
+            fid = found[0]["id"]
+            drive.files().update(fileId=fid, media_body=media).execute()
+        else:
+            fid = drive.files().create(body={"name": name}, media_body=media, fields="id").execute()["id"]
+            drive.permissions().create(fileId=fid, sendNotificationEmail=False,
+                                       body={"type": "user", "role": "reader",
+                                             "emailAddress": OWNER_GMAIL}).execute()
+        ids[name] = fid
+        print("%-45s %s" % (name, fid))
+    _backup_folder_id(drive)
+    print("backup folder ready: %r" % BACKUP_FOLDER_NAME)
+    print(json.dumps(ids))
+
+
 def _meta(drive, file_id):
     return drive.files().get(fileId=file_id,
                              fields="id,name,mimeType,size,modifiedTime,capabilities(canEdit)").execute()
@@ -314,6 +372,7 @@ def _pull_and_backup(drive):
     backup = _unique(os.path.join(BACKUP_DIR, "%s %s PRE-WRITE backup.xlsx" % (SELL_NAME, _stamp())))
     shutil.copy2(MASTER, backup)
     print("Sell Sheet: pulled %s bytes; backup -> %s" % (n, os.path.basename(backup)))
+    _drive_backup(drive, backup)
     return backup
 
 
@@ -578,6 +637,7 @@ def _appr_apply(drive, sheets, ops, commit):
         backup = _unique(os.path.join(BACKUP_DIR, "%s %s PRE-WRITE backup.xlsx" % (APPROVALS_NAME, _stamp())))
         n = _export_sheet_xlsx(drive, APPROVALS_ID, backup)
         print("Approvals: backup (%s bytes) -> %s" % (n, os.path.basename(backup)))
+        _drive_backup(drive, backup)
         sheets.spreadsheets().values().batchUpdate(
             spreadsheetId=APPROVALS_ID,
             body={"valueInputOption": "RAW",
@@ -724,12 +784,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("auth"); a.add_argument("--manual", action="store_true")
     a.add_argument("--url", action="store_true"); a.add_argument("--finish")
-    sub.add_parser("verify"); sub.add_parser("pull")
+    sub.add_parser("verify"); sub.add_parser("pull"); sub.add_parser("publish-cloud")
     sub.add_parser("audit")
     fx = sub.add_parser("fix-ranges"); fx.add_argument("--commit", action="store_true")
     ap2 = sub.add_parser("apply"); ap2.add_argument("ops"); ap2.add_argument("--commit", action="store_true")
     args = ap.parse_args()
-    {"auth": lambda: cmd_auth(args.manual, args.url, args.finish), "verify": cmd_verify, "pull": cmd_pull,
+    {"auth": lambda: cmd_auth(args.manual, args.url, args.finish), "verify": cmd_verify, "pull": cmd_pull, "publish-cloud": cmd_publish_cloud,
      "audit": cmd_audit,
      "fix-ranges": lambda: cmd_fix_ranges(args.commit),
      "apply": lambda: cmd_apply(args.ops, args.commit)}[args.cmd]()
